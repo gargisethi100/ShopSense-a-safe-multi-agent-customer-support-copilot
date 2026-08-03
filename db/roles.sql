@@ -93,15 +93,18 @@ GRANT USAGE ON SCHEMA public TO agent_ro, refund_writer;
 -- all on refunds or user_profiles. agent_ro cannot even see refund history.
 GRANT SELECT ON customers, products, orders TO agent_ro;
 
--- The single write path: append one row per approved refund. INSERT only:
+-- The single write path: append one row per approved refund.
 --   no UPDATE  -> a refund row can never be edited after the fact
 --   no DELETE  -> ...or erased. Financial history is append-only BY GRANT.
---   no SELECT  -> this role can't even read the table it writes to; the
---                 refund tool composes its INSERT from data it was handed,
---                 not from queries.
+--   SELECT     -> added in Phase 2: the refund tool must answer "was this
+--                 order ALREADY refunded?" before proposing a new one, and
+--                 refunds history is (correctly) invisible to agent_ro.
+--                 This is how grants should evolve: a permission appears
+--                 the day a feature needs it, with the reason written next
+--                 to it - never "just in case".
 -- (The order_id foreign-key check still works: Postgres validates FKs
 --  internally as the table owner, so the writer needs no grant on orders.)
-GRANT INSERT ON refunds TO refund_writer;
+GRANT SELECT, INSERT ON refunds TO refund_writer;
 
 -- Nothing to grant on sequences: our IDs are TEXT ('cust_001', 'ref_...'),
 -- not auto-increment counters, so there are no sequence objects to expose.
