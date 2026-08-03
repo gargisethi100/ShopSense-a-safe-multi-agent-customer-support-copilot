@@ -1,0 +1,76 @@
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+# The negation (!) matters: .env* would otherwise swallow .env.example, and the
+# template is the one file here that MUST be committed.
+.env
+.env.*
+!.env.example
+
+# Streamlit's own secrets mechanism. We don't use it (we use .env), but if you
+# ever try st.secrets, this is where the keys would land.
+.streamlit/secrets.toml
+
+# ---------------------------------------------------------------------------
+# Virtual environment
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+
+# ---------------------------------------------------------------------------
+# Python build artefacts
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# ---------------------------------------------------------------------------
+# Test + tool caches
+# ---------------------------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------------------
+# Runtime output
+# ---------------------------------------------------------------------------
+# Per-run token/cost logs (Phase 8) and the input-gate trigger log (Phase 7).
+# These contain real user messages, so they are operational data, not source.
+runs/
+*.log
+
+# ---------------------------------------------------------------------------
+# Editor / OS noise
+# ---------------------------------------------------------------------------
+.idea/
+.DS_Store
+Thumbs.db
+
+# .vscode/ is intentionally NOT ignored — committing shared editor settings
+# (interpreter path, formatter) helps a second person get running. Uncomment
+# the line below if you'd rather keep your local editor config private.
+# .vscode/
+
+
+# ===========================================================================
+# Two things .gitignore does NOT do. Both have bitten real projects.
+# ===========================================================================
+#
+# 1. It does not untrack a file that is ALREADY committed.
+#    If .env is ever committed, adding it here changes nothing: git keeps
+#    tracking it, and the value stays in history forever — recoverable by
+#    anyone who clones the repo, even after you "delete" it in a later commit.
+#    The only correct response to a committed key is to ROTATE THE KEY.
+#    Deleting the file is cleanup; rotating is the fix.
+#
+# 2. It does not keep files out of the Docker image.
+#    `docker build` reads .dockerignore, not .gitignore. A repo with a perfect
+#    .gitignore can still bake .env into a published image via `COPY . .`,
+#    where `docker history` will happily show it. We write .dockerignore in
+#    Phase 11 for exactly this reason.
