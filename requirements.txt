@@ -1,0 +1,95 @@
+# ShopSense — Python dependencies
+#
+# Rules this file follows:
+#   1. Exact pins (==) so that your machine, CI, and Render all install the
+#      same bytes. A build that passes evals here must pass them there.
+#   2. Only direct imports are listed. If we never `import x`, x is not here
+#      even if it ends up installed. (See "deliberately absent" at the bottom.)
+#   3. Grouped by the phase that first needs it, so nothing is installed
+#      before you know why it exists.
+
+# ---------------------------------------------------------------------------
+# Phase 0 — talking to Claude, and typed configuration
+# ---------------------------------------------------------------------------
+
+# The Claude chat model, wrapped for LangChain/LangGraph.
+# Pulls in `langchain-core` (message + tool abstractions) and the official
+# `anthropic` SDK underneath, so we don't pin either directly.
+langchain-anthropic==1.5.3
+
+# Loads settings from environment variables into a validated, typed object.
+# The alternative is os.environ.get("...") scattered across 30 files, where a
+# typo is a None at runtime instead of an error at startup.
+pydantic-settings==2.14.2
+
+# ---------------------------------------------------------------------------
+# Phase 1 — Postgres (Neon)
+# ---------------------------------------------------------------------------
+
+# psycopg 3 (NOT psycopg2). Two extras, both load-bearing:
+#   [binary] ships prebuilt wheels — no C compiler or libpq needed on Windows.
+#   [pool]   connection pooling, which langgraph-checkpoint-postgres requires.
+# We open two pools with two different Postgres roles: that separation is what
+# makes "the database says no" real instead of a claim in a prompt.
+psycopg[binary,pool]==3.3.4
+
+# ---------------------------------------------------------------------------
+# Phase 3 — retrieval over the policy documents
+# ---------------------------------------------------------------------------
+
+# Lexical (keyword) ranking, pure Python, no compiled dependencies.
+# Deliberately NOT sentence-transformers: Anthropic has no embeddings API, so
+# semantic search means either a second vendor key or a ~1GB PyTorch install.
+# We hide this behind a Retriever protocol in rag/retriever.py and can swap to
+# embeddings later without touching the agent that calls it.
+rank-bm25==0.2.2
+
+# ---------------------------------------------------------------------------
+# Phase 4 — the agent graph
+# ---------------------------------------------------------------------------
+
+# StateGraph, conditional edges, and interrupt() for human-in-the-loop.
+langgraph==1.2.10
+
+# PostgresSaver — persists checkpoints so a conversation survives a process
+# restart AND a redeploy. This is the package that replaces SqliteSaver; the
+# swap is one line precisely because persistence sits behind an interface.
+langgraph-checkpoint-postgres==3.1.1
+
+# ---------------------------------------------------------------------------
+# Phase 8 — observability
+# ---------------------------------------------------------------------------
+
+# LangSmith tracing. Tracing itself activates via env vars, but we import the
+# client directly in obs/ to read back per-run token counts.
+langsmith==0.10.15
+
+# ---------------------------------------------------------------------------
+# Phase 9 — user interface
+# ---------------------------------------------------------------------------
+
+# Chat UI + the refund approval panel + the cost footer.
+streamlit==1.60.0
+
+# ---------------------------------------------------------------------------
+# Phase 10 — the eval suite that gates the deploy
+# ---------------------------------------------------------------------------
+
+pytest==9.1.1
+
+
+# ---------------------------------------------------------------------------
+# Deliberately absent (and why)
+# ---------------------------------------------------------------------------
+# anthropic         -> installed by langchain-anthropic; we never import it directly.
+# langchain-core    -> same; it arrives as a dependency.
+# python-dotenv     -> same; pydantic-settings uses it internally to read .env.
+# langchain         -> the umbrella package. We use langgraph + langchain-anthropic
+#                      directly and never need it. Adding it pulls in a large tree
+#                      of integrations we will never call.
+# presidio-analyzer -> Phase 7b. Added only when we swap the regex Masker out,
+#                      so a large spaCy model download can't block Phase 0.
+#
+# Listing a transitive dependency you don't import is a quiet lie: it says
+# "this project uses this" when really "something else does". The cost is that
+# when the real user of that package drops it, you keep installing it forever.
