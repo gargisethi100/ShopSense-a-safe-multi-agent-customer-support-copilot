@@ -26,7 +26,7 @@ from datetime import date
 from functools import lru_cache
 from typing import Literal, NamedTuple
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
@@ -70,15 +70,21 @@ class ModelPricing(NamedTuple):
         return self.input_per_mtok, self.output_per_mtok
 
 
-# Model IDs are COMPLETE as written. Never append a date suffix — that is a
-# different (usually nonexistent) model and yields a 404.
+# BEDROCK model ids (Phase 3.5): Claude on Bedrock carries an `anthropic.`
+# prefix. Ids are COMPLETE as written - never append a date suffix.
+#
+# PRICING CAVEAT: Bedrock is partner-operated and AWS SETS ITS OWN PRICES.
+# The numbers below are Anthropic's first-party list prices, used as a
+# starting approximation - verify against https://aws.amazon.com/bedrock/pricing/
+# for your region and edit here. (The cost pipeline is the lesson; the
+# constants are yours to true-up.)
 MODEL_PRICING: dict[str, ModelPricing] = {
-    "claude-opus-5": ModelPricing(
+    "anthropic.claude-opus-5": ModelPricing(
         input_per_mtok=5.00,
         output_per_mtok=25.00,
         supports_temperature=False,
     ),
-    "claude-sonnet-5": ModelPricing(
+    "anthropic.claude-sonnet-5": ModelPricing(
         input_per_mtok=3.00,
         output_per_mtok=15.00,
         supports_temperature=False,
@@ -86,12 +92,27 @@ MODEL_PRICING: dict[str, ModelPricing] = {
         intro_output_per_mtok=10.00,
         intro_until=date(2026, 8, 31),
     ),
-    "claude-haiku-4-5": ModelPricing(
+    "anthropic.claude-haiku-4-5": ModelPricing(
         input_per_mtok=1.00,
         output_per_mtok=5.00,
         supports_temperature=True,
     ),
 }
+
+
+def _pricing_key(model: str) -> str:
+    """Normalise a Bedrock model id to its MODEL_PRICING key.
+
+    Some accounts must call Claude through a cross-region "inference
+    profile" whose id prepends a geography: us.anthropic.claude-opus-5,
+    eu.anthropic..., apac.anthropic... . Same model, same price - so
+    pricing lookups strip that one prefix. Everything else must match
+    exactly; unknown ids should FAIL, not silently price as $0.
+    """
+    first, _, rest = model.partition(".")
+    if first in {"us", "eu", "apac"} and rest.startswith("anthropic."):
+        return rest
+    return model
 
 # Prompt caching is billed at a multiple of the normal INPUT rate.
 # Writing to cache costs more than a normal token; reading is ~10x cheaper.
@@ -116,12 +137,13 @@ def cost_usd(
     that reads only `input_tokens` silently under-reports every cached run —
     which is exactly the runs you were hoping to measure.
     """
-    if model not in MODEL_PRICING:
+    key = _pricing_key(model)
+    if key not in MODEL_PRICING:
         raise KeyError(
             f"No pricing for model {model!r}. Add it to MODEL_PRICING in config.py "
             f"before using it, so cost reporting can never silently read as $0."
         )
-    in_rate, out_rate = MODEL_PRICING[model].rates(on)
+    in_rate, out_rate = MODEL_PRICING[key].rates(on)
     per_token_in = in_rate / 1_000_000
     per_token_out = out_rate / 1_000_000
     return (
@@ -142,9 +164,12 @@ class Settings(BaseSettings):
 
     Note the two naming regimes, which mirror the two sections of .env.example:
 
-      * `anthropic_api_key` uses an explicit validation_alias because the name
-        ANTHROPIC_API_KEY belongs to the Anthropic SDK, not to us.
-      * everything else is auto-prefixed SHOPSENSE_ by env_prefix below.
+      * AWS credentials (AWS_BEARER_TOKEN_BEDROCK / AWS_ACCESS_KEY_ID /
+        AWS_REGION) are NOT fields here at all: those names belong to boto3,
+        which reads them from the environment itself. Mirroring them into
+        Settings would create two sources of truth that can disagree. We only
+        CHECK their presence, at point of use, via require_aws_credentials().
+      * everything of ours is auto-prefixed SHOPSENSE_ by env_prefix below.
     """
 
     model_config = SettingsConfigDict(
@@ -156,11 +181,9 @@ class Settings(BaseSettings):
     )
 
     # --- credentials ------------------------------------------------------
-    # Deliberately optional so that `import config` works before you've pasted
-    # a key. Call require_api_key() at the point of actual use instead.
-    anthropic_api_key: SecretStr = Field(
-        default=SecretStr(""), validation_alias="ANTHROPIC_API_KEY"
-    )
+    # (none stored here - see the class docstring: AWS credentials belong to
+    #  boto3's environment contract; we validate presence in
+    #  require_aws_credentials() at the moment they're actually needed.)
 
     # --- database (Phase 1) -----------------------------------------------
     # One database, three roles. The privilege boundary is in Postgres, not in
@@ -170,8 +193,8 @@ class Settings(BaseSettings):
     db_url_writer: str = ""  # refund_writer: the single write path.
 
     # --- models -----------------------------------------------------------
-    model_agent: str = "claude-opus-5"
-    model_router: str = "claude-opus-5"
+    model_agent: str = "anthropic.claude-opus-5"
+    model_router: str = "anthropic.claude-opus-5"
 
     # Caps thinking AND the visible answer TOGETHER on this model generation.
     # Too small does not mean "cheaper", it means "truncated mid-sentence".
@@ -195,44 +218,66 @@ class Settings(BaseSettings):
         This looks pedantic until you realise the alternative: the app runs
         fine, the cost footer quietly reports $0.00, and you discover the real
         number on an invoice. Failing at startup is the cheaper bug.
+        (Geo prefixes like us./eu. are normalised away first - see
+        _pricing_key - so an inference-profile id of a priced model passes.)
         """
-        if v not in MODEL_PRICING:
+        if _pricing_key(v) not in MODEL_PRICING:
             known = ", ".join(sorted(MODEL_PRICING))
             raise ValueError(
-                f"Unknown model {v!r}. Known: {known}. "
-                f"If this is a new model, add it to MODEL_PRICING in config.py "
-                f"(with its real prices) rather than removing this check."
+                f"Unknown model {v!r}. Known: {known} (a us./eu./apac. prefix "
+                f"on any of these is also fine). If this is a new model, add "
+                f"it to MODEL_PRICING in config.py (with its real prices) "
+                f"rather than removing this check."
             )
         return v
 
     # --- capability helpers -----------------------------------------------
 
     def pricing(self, model: str) -> ModelPricing:
-        return MODEL_PRICING[model]
+        return MODEL_PRICING[_pricing_key(model)]
 
     def supports_temperature(self, model: str) -> bool:
         """True if this model accepts `temperature`.
 
-        claude-opus-5 and claude-sonnet-5 return HTTP 400 if you send it.
-        claude-haiku-4-5 accepts it — which is why moving the router to Haiku
-        also buys deterministic (temperature=0) routing.
+        The Claude 5 generation (opus-5 / sonnet-5) rejects the parameter
+        outright; claude-haiku-4-5 accepts it — which is why moving the
+        router to Haiku also buys deterministic (temperature=0) routing.
         """
-        return MODEL_PRICING[model].supports_temperature
+        return MODEL_PRICING[_pricing_key(model)].supports_temperature
 
     # --- "you need a credential now" helpers ------------------------------
     # These exist so a missing value produces a sentence telling you what to
-    # do, at the moment it matters, instead of a TypeError deep in a driver.
+    # do, at the moment it matters, instead of a cryptic SDK error deep in
+    # a network call.
 
-    def require_api_key(self) -> str:
-        key = self.anthropic_api_key.get_secret_value()
-        if not key:
+    def require_aws_credentials(self) -> None:
+        """Check the boto3 credential environment before any Bedrock call.
+
+        Deliberately reads os.environ (not Settings fields): these names are
+        boto3's contract, and boto3 will read them itself — we only verify
+        they exist so the failure is a sentence, not a NoCredentialsError
+        five tool-calls deep. Either auth style passes:
+          * AWS_BEARER_TOKEN_BEDROCK          (Bedrock API key), or
+          * AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY   (IAM key pair)
+        AWS_REGION is required either way (model ids are per-region).
+        """
+        bearer = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
+        pair = os.environ.get("AWS_ACCESS_KEY_ID", "") and os.environ.get(
+            "AWS_SECRET_ACCESS_KEY", ""
+        )
+        if not (bearer or pair):
             raise RuntimeError(
-                "ANTHROPIC_API_KEY is empty.\n"
-                "  1. Get a key at https://console.anthropic.com -> API keys\n"
-                "  2. Set a SPENDING LIMIT while you are there\n"
-                "  3. Paste it into .env  (NOT .env.example)"
+                "No AWS credentials found for Bedrock.\n"
+                "  Set AWS_BEARER_TOKEN_BEDROCK (a Bedrock API key), or\n"
+                "  AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY, in .env\n"
+                "  (NOT .env.example). Then set a budget alarm in AWS Billing."
             )
-        return key
+        if not os.environ.get("AWS_REGION"):
+            raise RuntimeError(
+                "AWS_REGION is empty. Set it in .env to the region your "
+                "Bedrock access lives in (e.g. us-east-1). Model ids are "
+                "per-region; `python llm.py list` shows what yours offers."
+            )
 
     def require_db_url(self, which: Literal["admin", "ro", "writer"]) -> str:
         value = {
@@ -264,8 +309,13 @@ class Settings(BaseSettings):
 
     def summary(self) -> str:
         """Human-readable, secret-safe dump. Safe to log or paste into an issue."""
-        key = self.anthropic_api_key.get_secret_value()
-        key_state = f"set ({len(key)} chars)" if key else "MISSING"
+        if os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+            key_state = "bedrock api key set"
+        elif os.environ.get("AWS_ACCESS_KEY_ID"):
+            key_state = "iam key pair set"
+        else:
+            key_state = "MISSING"
+        region = os.environ.get("AWS_REGION", "MISSING")
 
         def db(v: str) -> str:
             if not v:
@@ -274,11 +324,12 @@ class Settings(BaseSettings):
             tail = v.rsplit("@", 1)[-1]
             return f"set (…@{tail[:40]})"
 
-        in_rate, out_rate = MODEL_PRICING[self.model_agent].rates()
+        in_rate, out_rate = MODEL_PRICING[_pricing_key(self.model_agent)].rates()
         lines = [
             "ShopSense configuration",
             "-" * 46,
-            f"  anthropic_api_key : {key_state}",
+            f"  aws credentials   : {key_state}",
+            f"  aws region        : {region}",
             f"  model_agent       : {self.model_agent}  (${in_rate}/${out_rate} per Mtok today)",
             f"  model_router      : {self.model_router}",
             f"  max_tokens        : {self.max_tokens}   (thinking + answer combined)",
@@ -319,9 +370,9 @@ if __name__ == "__main__":
 
     print("\nWhy cached tokens must be counted separately")
     print("-" * 46)
-    naive = cost_usd("claude-opus-5", input_tokens=500, output_tokens=400)
+    naive = cost_usd("anthropic.claude-opus-5", input_tokens=500, output_tokens=400)
     honest = cost_usd(
-        "claude-opus-5",
+        "anthropic.claude-opus-5",
         input_tokens=500,
         output_tokens=400,
         cache_read_tokens=20_000,

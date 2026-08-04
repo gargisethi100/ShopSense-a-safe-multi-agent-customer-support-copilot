@@ -12,10 +12,20 @@
 # Phase 0 — talking to Claude, and typed configuration
 # ---------------------------------------------------------------------------
 
-# The Claude chat model, wrapped for LangChain/LangGraph.
-# Pulls in `langchain-core` (message + tool abstractions) and the official
-# `anthropic` SDK underneath, so we don't pin either directly.
-langchain-anthropic==1.5.3
+# Claude via AWS Bedrock, wrapped for LangChain/LangGraph (Phase 3.5 switch:
+# this project authenticates with a Bedrock key, not a direct Anthropic key).
+# Pulls in `langchain-core` (message + tool abstractions) underneath, so we
+# don't pin that directly.
+# NOTE on pins: if pip reports "no matching version", run
+#   pip index versions langchain-aws
+# and update to the newest 1.x - then re-run the llm.py smoke test.
+langchain-aws==1.4.0
+
+# The AWS SDK. Already a dependency of langchain-aws, but we ALSO import it
+# directly (llm.py's `list` mode discovers your account's Claude model ids),
+# and the rule is: if we import it, we pin it. Needs >=1.39 so the
+# AWS_BEARER_TOKEN_BEDROCK env var (Bedrock API key) is honoured.
+boto3==1.40.5
 
 # Loads settings from environment variables into a validated, typed object.
 # The alternative is os.environ.get("...") scattered across 30 files, where a
@@ -81,9 +91,12 @@ pytest==9.1.1
 # ---------------------------------------------------------------------------
 # Deliberately absent (and why)
 # ---------------------------------------------------------------------------
-# anthropic         -> installed by langchain-anthropic; we never import it directly.
-# langchain-core    -> same; it arrives as a dependency.
-# python-dotenv     -> same; pydantic-settings uses it internally to read .env.
+# langchain-core    -> arrives as a dependency of langchain-aws; we import it
+#                      (langchain_core.tools) but follow LangChain's guidance
+#                      to let the provider package pick the compatible core.
+# langchain-anthropic -> REMOVED in Phase 3.5 (Bedrock switch). Only llm.py
+#                      ever imported it - which is why removal was painless.
+# python-dotenv     -> pydantic-settings uses it internally to read .env.
 # langchain         -> the umbrella package. We use langgraph + langchain-anthropic
 #                      directly and never need it. Adding it pulls in a large tree
 #                      of integrations we will never call.

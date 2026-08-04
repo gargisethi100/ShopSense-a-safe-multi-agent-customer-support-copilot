@@ -1,30 +1,38 @@
-"""The only place a Claude client is constructed.
+"""The only place an LLM client is constructed. (Rewired for Bedrock, 3.5.)
 
-Why a factory instead of `ChatAnthropic(...)` scattered across nodes:
+THE PAYOFF, DELIVERED
+    Phase 0 promised: "when the provider changes, zero call sites change."
+    Phase 3.5 collected: this file swapped ChatAnthropic for Bedrock's
+    ChatBedrockConverse, config swapped model ids and credentials - and
+    NOT ONE other file was touched. Every future node keeps calling
+    get_llm("agent") in blissful ignorance of what's behind the door.
 
-1.  The model rules live in ONE place. `claude-opus-5` rejects `temperature`
-    with HTTP 400; `claude-haiku-4-5` accepts it. Every node constructing its
-    own client is a node that can get this wrong. Here, the capability flag in
-    config.py decides, and a node literally cannot send a bad parameter.
+WHAT CHANGED UNDER THE HOOD
+    * Provider: langchain-aws ChatBedrockConverse -> Amazon Bedrock's
+      Converse API -> Claude. Credentials come from boto3's environment
+      contract (AWS_BEARER_TOKEN_BEDROCK or an IAM key pair + AWS_REGION);
+      we never handle them in code - one less place a secret can leak.
+    * Model ids: Bedrock's `anthropic.`-prefixed ids (or us./eu./apac.
+      inference-profile variants). NEVER GUESSED: run  python llm.py list
+      to see what your account+region actually serves.
+    * Effort: Bedrock supports the Claude effort dial, but langchain-aws
+      has no named parameter for it. Provider-specific extras ride in
+      `additional_model_request_fields`, passed through verbatim to the
+      API. The live smoke test is the verifier: if your region rejects
+      the field, the error names it and the fix is one commented line.
 
-2.  Roles, not models. Call sites say get_llm("router") — *what the call is
-    for* — and config decides which model that means today. When we move
-    routing from Opus to Haiku in Phase 4, zero call sites change.
-
-3.  Usage extraction is subtle enough to centralise (see usage_from below —
-    LangChain and the raw Anthropic API disagree about what "input_tokens"
-    means, and the difference is exactly the cached tokens).
-
-Run directly for a live smoke test (needs ANTHROPIC_API_KEY in .env):
-
-    python llm.py
+Run:
+    python llm.py         live smoke test (needs credentials in .env)
+    python llm.py list    discover the Claude model ids your account offers
 """
 
 from __future__ import annotations
 
+import sys
 from typing import Literal, NamedTuple
 
-from langchain_anthropic import ChatAnthropic
+import boto3
+from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import AIMessage
 
 from config import cost_usd, get_settings
@@ -37,47 +45,49 @@ def get_llm(
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
-) -> ChatAnthropic:
-    """Build a Claude client for a given ROLE (not a given model).
+) -> ChatBedrockConverse:
+    """Build a Claude-on-Bedrock client for a given ROLE (not a given model).
 
     role="agent"   the specialists doing real reasoning (order/policy agents)
     role="router"  high-volume single-label classification (supervisor, gates)
 
     `temperature` is honoured only if the resolved model supports it; on a
-    model that would 400, we raise HERE, at construction, with an explanation —
-    not five tool calls deep inside a graph run.
+    model that would reject it we raise HERE, at construction, with an
+    explanation - not five tool calls deep inside a graph run.
     """
     settings = get_settings()
-    settings.require_api_key()  # fail with instructions, not a cryptic 401
+    settings.require_aws_credentials()  # a sentence, not a NoCredentialsError
 
     model = settings.model_agent if role == "agent" else settings.model_router
 
     kwargs: dict = {
         "model": model,
         "max_tokens": max_tokens or settings.max_tokens,
-        # `effort` controls how hard the model thinks (low..max). This is the
-        # cost/quality dial on the Claude 5 generation — the role temperature
-        # used to play, now that sampling params are gone.
-        "reasoning_effort": settings.effort,
+        # The effort dial (low..max) - the cost/quality control on the
+        # Claude 5 generation. No first-class langchain-aws parameter, so it
+        # travels in the provider-passthrough field. If your region's
+        # Bedrock rejects `output_config`, comment out these three lines and
+        # re-run the smoke test; everything else works without it.
+        "additional_model_request_fields": {
+            "output_config": {"effort": settings.effort},
+        },
     }
 
     if temperature is not None:
         if not settings.supports_temperature(model):
             raise ValueError(
                 f"temperature={temperature} was requested, but {model!r} rejects "
-                f"the temperature parameter (HTTP 400). Either drop it, or point "
-                f"this role at a model that supports it (e.g. claude-haiku-4-5 "
+                f"the temperature parameter. Either drop it, or point this role "
+                f"at a model that supports it (e.g. anthropic.claude-haiku-4-5 "
                 f"for deterministic routing)."
             )
         kwargs["temperature"] = temperature
 
     # NOTE deliberately absent:
-    #   - `thinking`: on claude-opus-5 thinking is ON by default (adaptive).
-    #     We pass nothing and get the recommended behaviour for free.
-    #   - `anthropic_api_key`: the SDK reads ANTHROPIC_API_KEY from the
-    #     environment itself; passing it around in code is one more place a
-    #     secret could leak into a log.
-    return ChatAnthropic(**kwargs)
+    #   - region_name: boto3 reads AWS_REGION itself (require_aws_credentials
+    #     already confirmed it's set). One source of truth.
+    #   - credentials: same - boto3's environment contract, never our code.
+    return ChatBedrockConverse(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -119,24 +129,22 @@ class CallUsage(NamedTuple):
 def usage_from(message: AIMessage, model: str) -> CallUsage:
     """Extract billing-shaped usage from a LangChain response.
 
-    THE TRAP this function exists for: LangChain and the raw Anthropic API
-    define `input_tokens` differently.
+    THE TRAP this function exists for (survives the Bedrock switch intact,
+    because it lives at the LangChain layer): LangChain's standardized
+    usage_metadata defines `input_tokens` as the TOTAL prompt - base +
+    cache_read + cache_creation - while billing rates the three parts
+    differently. So we subtract the cache parts back out. Feed the raw
+    total into pricing and every cached token gets double-counted.
 
-        raw API   : input_tokens = the UNCACHED REMAINDER only
-        LangChain : usage_metadata["input_tokens"] = base + cache_read
-                    + cache_creation  (it re-totals; verified in
-                    langchain_anthropic.chat_models._create_usage_metadata)
-
-    Our pricing function wants the split three ways (each part bills at a
-    different rate), so we subtract the cache parts back out of LangChain's
-    total. Feed LangChain's number in directly and every cached token would be
-    double-counted — once at full rate, once at its cache rate.
+    ChatBedrockConverse fills the same standardized shape (that is the
+    point of LangChain's abstraction); cache detail keys may simply be
+    absent until prompt caching is in play - .get(...) treats absent as 0.
     """
     um = message.usage_metadata or {}
     details = um.get("input_token_details") or {}
 
     cache_read = details.get("cache_read") or 0
-    # 5m/1h TTL-specific keys replace the generic one when present.
+    # TTL-specific keys replace the generic one when a provider reports them.
     cache_creation = (
         (details.get("ephemeral_5m_input_tokens") or 0)
         + (details.get("ephemeral_1h_input_tokens") or 0)
@@ -155,22 +163,84 @@ def usage_from(message: AIMessage, model: str) -> CallUsage:
 
 
 # ---------------------------------------------------------------------------
+# Model discovery - because guessing Bedrock ids is how you get 4-hour
+# debugging sessions over a missing prefix.
+# ---------------------------------------------------------------------------
+
+
+def list_claude_models() -> None:
+    """Print the Claude ids THIS account+region actually serves."""
+    settings = get_settings()
+    settings.require_aws_credentials()
+
+    client = boto3.client("bedrock")  # region from AWS_REGION
+    print("foundation models (provider: anthropic)")
+    print("-" * 46)
+    try:
+        resp = client.list_foundation_models(byProvider="anthropic")
+        for m in resp.get("modelSummaries", []):
+            print(f"  {m['modelId']}")
+    except Exception as e:
+        print(f"  could not list: {type(e).__name__}: {e}")
+
+    print("\ninference profiles (cross-region ids, if your account uses them)")
+    print("-" * 46)
+    try:
+        resp = client.list_inference_profiles()
+        for p in resp.get("inferenceProfileSummaries", []):
+            pid = p.get("inferenceProfileId", "")
+            if "anthropic" in pid:
+                print(f"  {pid}")
+    except Exception as e:
+        print(f"  could not list: {type(e).__name__}: {e}")
+
+    print(
+        "\nPut your chosen id into .env as SHOPSENSE_MODEL_AGENT / _ROUTER.\n"
+        "If it's not in config.py's MODEL_PRICING (geo prefix aside), add it "
+        "there with its price first - startup validation insists."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Smoke test
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "list":
+        try:
+            list_claude_models()
+        except RuntimeError as e:
+            print(f"\n{e}")
+        raise SystemExit(0)
+
     settings = get_settings()
     print(f"model_agent = {settings.model_agent}, effort = {settings.effort}")
 
     try:
         llm = get_llm("agent")
     except RuntimeError as e:
-        # No key yet: explain and exit 0 - an unconfigured machine is not broken.
+        # No credentials yet: explain and exit 0 - unconfigured is not broken.
         print(f"\n{e}")
         raise SystemExit(0)
 
-    print("calling Claude...")
-    reply = llm.invoke("Reply with exactly five words about e-commerce refunds.")
+    print("calling Claude via Bedrock...")
+    try:
+        reply = llm.invoke("Reply with exactly five words about e-commerce refunds.")
+    except Exception as e:
+        msg = str(e)
+        print(f"\nCALL FAILED: {type(e).__name__}: {msg[:300]}")
+        if "model" in msg.lower() and ("identifier" in msg.lower() or "found" in msg.lower()):
+            print(
+                "\nLikely a model-id problem. Run  python llm.py list  and put "
+                "an id your account actually serves into .env "
+                "(SHOPSENSE_MODEL_AGENT / _ROUTER)."
+            )
+        if "output_config" in msg or "additionalModelRequestFields" in msg:
+            print(
+                "\nLikely the effort passthrough. Comment out the "
+                "additional_model_request_fields block in get_llm() and re-run."
+            )
+        raise SystemExit(1)
 
     print(f"\nreply : {reply.text()}")
     u = usage_from(reply, settings.model_agent)
