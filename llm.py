@@ -28,6 +28,7 @@ Run:
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Literal, NamedTuple
 
@@ -62,16 +63,23 @@ def get_llm(
 
     kwargs: dict = {
         "model": model,
+        # Passed EXPLICITLY, not left to boto3's env-var chain: in testing,
+        # botocore raised NoRegionError despite AWS_REGION being set in the
+        # environment. Explicit beats implicit the moment implicit fails once.
+        "region_name": os.environ["AWS_REGION"],
         "max_tokens": max_tokens or settings.max_tokens,
-        # The effort dial (low..max) - the cost/quality control on the
-        # Claude 5 generation. No first-class langchain-aws parameter, so it
-        # travels in the provider-passthrough field. If your region's
-        # Bedrock rejects `output_config`, comment out these three lines and
-        # re-run the smoke test; everything else works without it.
-        "additional_model_request_fields": {
-            "output_config": {"effort": settings.effort},
-        },
     }
+
+    # The effort dial (thinking depth). No first-class langchain-aws
+    # parameter, so it rides in the provider-passthrough field - and ONLY
+    # for models that accept it. claude-haiku-4-5 answers a request carrying
+    # output_config with a ValidationException, which is why the capability
+    # lives in config's pricing table (verified by a real call) instead of
+    # in an assumption here.
+    if settings.supports_effort(model):
+        kwargs["additional_model_request_fields"] = {
+            "output_config": {"effort": settings.effort},
+        }
 
     if temperature is not None:
         if not settings.supports_temperature(model):
@@ -83,10 +91,9 @@ def get_llm(
             )
         kwargs["temperature"] = temperature
 
-    # NOTE deliberately absent:
-    #   - region_name: boto3 reads AWS_REGION itself (require_aws_credentials
-    #     already confirmed it's set). One source of truth.
-    #   - credentials: same - boto3's environment contract, never our code.
+    # NOTE deliberately absent: credentials. Those stay on boto3's
+    # environment contract (AWS_BEARER_TOKEN_BEDROCK / key pair) - passing
+    # them around in code is one more place a secret could leak into a log.
     return ChatBedrockConverse(**kwargs)
 
 
@@ -173,7 +180,7 @@ def list_claude_models() -> None:
     settings = get_settings()
     settings.require_aws_credentials()
 
-    client = boto3.client("bedrock")  # region from AWS_REGION
+    client = boto3.client("bedrock", region_name=os.environ["AWS_REGION"])
     print("foundation models (provider: anthropic)")
     print("-" * 46)
     try:
@@ -214,7 +221,11 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     settings = get_settings()
-    print(f"model_agent = {settings.model_agent}, effort = {settings.effort}")
+    print(f"model_agent  = {settings.model_agent}")
+    print(f"model_router = {settings.model_router}")
+    print(f"effort       = {settings.effort} "
+          f"(agent sends it: {settings.supports_effort(settings.model_agent)}, "
+          f"router: {settings.supports_effort(settings.model_router)})")
 
     try:
         llm = get_llm("agent")
@@ -242,7 +253,7 @@ if __name__ == "__main__":
             )
         raise SystemExit(1)
 
-    print(f"\nreply : {reply.text()}")
+    print(f"\nreply : {reply.text}")
     u = usage_from(reply, settings.model_agent)
     print(f"usage : {u}")
     print(
@@ -250,9 +261,23 @@ if __name__ == "__main__":
         f"cache_read={u.cache_read} output={u.output}"
     )
 
-    # Sanity: prove the temperature guard works on the live config too.
+    # Also exercise the router role - it's a different model with different
+    # capabilities, so "the agent works" does not imply "the router works".
+    print("\ncalling the router model...")
+    router_reply = get_llm("router", temperature=0.0).invoke("Reply with one word: ok")
+    print(f"reply : {router_reply.text}")
+    print(f"usage : {usage_from(router_reply, settings.model_router)}")
+
+    # Sanity: the temperature guard fires only on models that reject it, so
+    # assert against the CONFIGURED capability rather than a hardcoded model.
+    guard_should_fire = not settings.supports_temperature(settings.model_agent)
     try:
         get_llm("agent", temperature=0.0)
-        print("temperature guard: FAILED TO FIRE (should not happen on opus-5)")
-    except ValueError as e:
-        print(f"temperature guard: ok - {str(e)[:60]}...")
+        fired = False
+    except ValueError:
+        fired = True
+    print(
+        f"\ntemperature guard: {'fired' if fired else 'silent'} "
+        f"(expected {'fired' if guard_should_fire else 'silent'}) - "
+        f"{'ok' if fired == guard_should_fire else 'MISMATCH'}"
+    )

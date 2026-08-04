@@ -19,13 +19,19 @@
 # NOTE on pins: if pip reports "no matching version", run
 #   pip index versions langchain-aws
 # and update to the newest 1.x - then re-run the llm.py smoke test.
-langchain-aws==1.4.0
+langchain-aws==1.6.4
 
 # The AWS SDK. Already a dependency of langchain-aws, but we ALSO import it
 # directly (llm.py's `list` mode discovers your account's Claude model ids),
 # and the rule is: if we import it, we pin it. Needs >=1.39 so the
 # AWS_BEARER_TOKEN_BEDROCK env var (Bedrock API key) is honoured.
-boto3==1.40.5
+boto3==1.43.63
+
+# Loads .env into the process environment (config.py calls load_dotenv()).
+# Promoted from transitive dependency to direct in Phase 3.5: boto3 and the
+# langsmith client read credentials from os.environ, and pydantic-settings
+# reads .env only for its own fields - somebody has to bridge the two.
+python-dotenv==1.2.2
 
 # Loads settings from environment variables into a validated, typed object.
 # The alternative is os.environ.get("...") scattered across 30 files, where a
@@ -96,7 +102,8 @@ pytest==9.1.1
 #                      to let the provider package pick the compatible core.
 # langchain-anthropic -> REMOVED in Phase 3.5 (Bedrock switch). Only llm.py
 #                      ever imported it - which is why removal was painless.
-# python-dotenv     -> pydantic-settings uses it internally to read .env.
+# (python-dotenv was listed here until Phase 3.5, when config.py started
+#  importing it directly - see its entry above. The rule works both ways.)
 # langchain         -> the umbrella package. We use langgraph + langchain-anthropic
 #                      directly and never need it. Adding it pulls in a large tree
 #                      of integrations we will never call.

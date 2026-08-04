@@ -26,8 +26,21 @@ from datetime import date
 from functools import lru_cache
 from typing import Literal, NamedTuple
 
+from dotenv import load_dotenv
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Load .env into the PROCESS ENVIRONMENT, once, at import.
+#
+# Why this line exists (a Phase 3.5 lesson learned the honest way):
+# pydantic-settings reads .env for ITS OWN fields only - it never exports
+# values to os.environ. Section A variables (AWS_* for boto3, LANGSMITH_*)
+# are read by third-party libraries straight from os.environ, so without
+# this line they would see nothing and fail as if .env were empty.
+# `override=False` (the default): a variable already set in the real
+# environment (e.g. by Render or CI) wins over the .env file - production
+# config beats the local file, never the other way around.
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Model facts
@@ -52,6 +65,13 @@ class ModelPricing(NamedTuple):
     # Older/smaller models still accept it. llm.py reads this flag so that no
     # individual node can get it wrong.
     supports_temperature: bool
+
+    # Whether the model accepts `output_config.effort` (the thinking-depth
+    # dial). VERIFIED EMPIRICALLY against Bedrock in Phase 3.5, not assumed:
+    # claude-haiku-4-5 rejects it with a ValidationException; sonnet-4-6
+    # accepts it. Capability flags belong in this table precisely so one
+    # failed call teaches the whole codebase, permanently.
+    supports_effort: bool = True
 
     # Promotional pricing has an end date. A cost tracker that ignores this
     # over-reports today and under-reports after it lapses.
@@ -78,8 +98,34 @@ class ModelPricing(NamedTuple):
 # starting approximation - verify against https://aws.amazon.com/bedrock/pricing/
 # for your region and edit here. (The cost pipeline is the lesson; the
 # constants are yours to true-up.)
+#
+# ACCESS != EXISTENCE: `python llm.py list` shows what the REGION offers;
+# your ACCOUNT may still be denied. The two marked "enabled" below are the
+# ones that actually answered a live call from this account (Phase 3.5).
 MODEL_PRICING: dict[str, ModelPricing] = {
+    # --- enabled on this account ---------------------------------------
+    "anthropic.claude-sonnet-4-6": ModelPricing(
+        input_per_mtok=3.00,
+        output_per_mtok=15.00,
+        supports_temperature=True,
+        supports_effort=True,
+    ),
+    # Haiku's Bedrock id carries a date+version suffix; it is part of the id,
+    # not decoration - the bare 'anthropic.claude-haiku-4-5' is rejected.
+    "anthropic.claude-haiku-4-5-20251001-v1:0": ModelPricing(
+        input_per_mtok=1.00,
+        output_per_mtok=5.00,
+        supports_temperature=True,
+        supports_effort=False,  # ValidationException: output_config unsupported
+    ),
+    # --- priced, but this account is currently denied access ------------
+    # (kept so that enabling them in the AWS console is a one-line .env edit)
     "anthropic.claude-opus-5": ModelPricing(
+        input_per_mtok=5.00,
+        output_per_mtok=25.00,
+        supports_temperature=False,
+    ),
+    "anthropic.claude-opus-4-8": ModelPricing(
         input_per_mtok=5.00,
         output_per_mtok=25.00,
         supports_temperature=False,
@@ -92,25 +138,20 @@ MODEL_PRICING: dict[str, ModelPricing] = {
         intro_output_per_mtok=10.00,
         intro_until=date(2026, 8, 31),
     ),
-    "anthropic.claude-haiku-4-5": ModelPricing(
-        input_per_mtok=1.00,
-        output_per_mtok=5.00,
-        supports_temperature=True,
-    ),
 }
 
 
 def _pricing_key(model: str) -> str:
     """Normalise a Bedrock model id to its MODEL_PRICING key.
 
-    Some accounts must call Claude through a cross-region "inference
-    profile" whose id prepends a geography: us.anthropic.claude-opus-5,
-    eu.anthropic..., apac.anthropic... . Same model, same price - so
-    pricing lookups strip that one prefix. Everything else must match
-    exactly; unknown ids should FAIL, not silently price as $0.
+    Most accounts must call Claude through a cross-region "inference
+    profile" whose id prepends a geography: us.anthropic..., eu...,
+    apac..., global... . Same model, same price - so pricing lookups strip
+    that one prefix. Everything else must match exactly; unknown ids should
+    FAIL, not silently price as $0.
     """
     first, _, rest = model.partition(".")
-    if first in {"us", "eu", "apac"} and rest.startswith("anthropic."):
+    if first in {"us", "eu", "apac", "global"} and rest.startswith("anthropic."):
         return rest
     return model
 
@@ -193,8 +234,9 @@ class Settings(BaseSettings):
     db_url_writer: str = ""  # refund_writer: the single write path.
 
     # --- models -----------------------------------------------------------
-    model_agent: str = "anthropic.claude-opus-5"
-    model_router: str = "anthropic.claude-opus-5"
+    # Defaults are what THIS account can actually invoke (Phase 3.5 probe).
+    model_agent: str = "us.anthropic.claude-sonnet-4-6"
+    model_router: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
     # Caps thinking AND the visible answer TOGETHER on this model generation.
     # Too small does not mean "cheaper", it means "truncated mid-sentence".
@@ -240,10 +282,15 @@ class Settings(BaseSettings):
         """True if this model accepts `temperature`.
 
         The Claude 5 generation (opus-5 / sonnet-5) rejects the parameter
-        outright; claude-haiku-4-5 accepts it — which is why moving the
-        router to Haiku also buys deterministic (temperature=0) routing.
+        outright; claude-haiku-4-5 and sonnet-4-6 accept it — which is why
+        the router on Haiku can be pinned to temperature=0 for deterministic
+        routing (and stable routing evals in Phase 10).
         """
         return MODEL_PRICING[_pricing_key(model)].supports_temperature
+
+    def supports_effort(self, model: str) -> bool:
+        """True if this model accepts output_config.effort (thinking depth)."""
+        return MODEL_PRICING[_pricing_key(model)].supports_effort
 
     # --- "you need a credential now" helpers ------------------------------
     # These exist so a missing value produces a sentence telling you what to
@@ -333,8 +380,10 @@ class Settings(BaseSettings):
             f"  model_agent       : {self.model_agent}  (${in_rate}/${out_rate} per Mtok today)",
             f"  model_router      : {self.model_router}",
             f"  max_tokens        : {self.max_tokens}   (thinking + answer combined)",
-            f"  effort            : {self.effort}",
-            f"  temperature usable: {self.supports_temperature(self.model_agent)}",
+            f"  effort            : {self.effort}"
+            f"  (agent: {'sent' if self.supports_effort(self.model_agent) else 'UNSUPPORTED, omitted'})",
+            f"  temperature usable: agent={self.supports_temperature(self.model_agent)}"
+            f" router={self.supports_temperature(self.model_router)}",
             f"  guardrails_mode   : {self.guardrails_mode}",
             f"  log_level         : {self.log_level}",
             f"  langsmith tracing : {'on' if self.tracing_enabled else 'off'}",
@@ -370,9 +419,9 @@ if __name__ == "__main__":
 
     print("\nWhy cached tokens must be counted separately")
     print("-" * 46)
-    naive = cost_usd("anthropic.claude-opus-5", input_tokens=500, output_tokens=400)
+    naive = cost_usd(settings.model_agent, input_tokens=500, output_tokens=400)
     honest = cost_usd(
-        "anthropic.claude-opus-5",
+        settings.model_agent,
         input_tokens=500,
         output_tokens=400,
         cache_read_tokens=20_000,
