@@ -190,6 +190,10 @@ def order_agent_node(state: ShopSenseState) -> dict:
 if __name__ == "__main__":
     import psycopg
 
+    from config import enable_utf8_console
+
+    enable_utf8_console()  # the model's answers may contain emoji
+
     QUESTIONS = [
         "Where is my order ord_1003?",
         "Hi, it's dana@example.com - what have I ordered recently?",

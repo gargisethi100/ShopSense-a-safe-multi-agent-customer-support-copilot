@@ -22,6 +22,7 @@ Run it directly to see your resolved config with secrets redacted:
 from __future__ import annotations
 
 import os
+import sys
 from datetime import date
 from functools import lru_cache
 from typing import Literal, NamedTuple
@@ -392,6 +393,26 @@ class Settings(BaseSettings):
             f"  db writer         : {db(self.db_url_writer)}",
         ]
         return "\n".join(lines)
+
+
+def enable_utf8_console() -> None:
+    """Make printing MODEL OUTPUT safe on a Windows terminal.
+
+    Our own strings are kept ASCII-only, but a model will happily reply with
+    an emoji or a curly quote, and the default Windows console codepage
+    (cp1252) raises UnicodeEncodeError on those - crashing a script AFTER
+    the expensive API call already succeeded.
+
+    `errors="replace"` is the load-bearing part: a character the terminal
+    genuinely cannot draw becomes '?' instead of an exception. Cosmetic
+    degradation beats a traceback.
+
+    Call this at the top of any __main__ block that prints model output.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:  # absent when output is piped oddly
+            reconfigure(encoding="utf-8", errors="replace")
 
 
 @lru_cache(maxsize=1)

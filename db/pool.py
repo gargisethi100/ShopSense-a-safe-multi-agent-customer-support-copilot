@@ -36,6 +36,7 @@ schema.sql + roles.sql already applied on Neon):
 
 from __future__ import annotations
 
+import atexit
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Iterator
@@ -99,6 +100,25 @@ def get_writer_pool() -> ConnectionPool:
     """
     url = get_settings().require_db_url("writer")
     return _make_pool(url, name="shopsense-writer", autocommit=False)
+
+
+@atexit.register
+def close_pools() -> None:
+    """Shut the pools down cleanly when the process ends.
+
+    A pool runs BACKGROUND THREADS (workers that open connections, plus a
+    scheduler that recycles idle ones). Python won't exit while those are
+    alive, so without this you get a 5-second hang and a stern
+    "couldn't stop thread 'shopsense-ro-worker-0'" warning on every script.
+
+    Registered with @atexit so nothing has to remember to call it. Note it
+    asks the CACHE whether a pool was ever built (`cache_info().currsize`)
+    rather than calling get_ro_pool() - which would helpfully CREATE a pool
+    at shutdown just to close it. Cleanup must never allocate.
+    """
+    for getter in (get_ro_pool, get_writer_pool):
+        if getter.cache_info().currsize:
+            getter().close()
 
 
 @contextmanager
