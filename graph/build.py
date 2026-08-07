@@ -65,6 +65,8 @@ from graph.approval import refund_approval_node, route_after_order_agent
 from graph.memory import hydrate_profile, save_profile, summarize_node
 from graph.state import ShopSenseState, format_cost_footer
 from graph.supervisor import route_from_state, supervisor_node
+from guards.input_gate import input_gate_node, route_after_gate
+from guards.output_rail import output_rail_node
 
 
 def memory_node(state: ShopSenseState) -> dict:
@@ -81,7 +83,9 @@ def build_graph(checkpointer=None):
     """
     builder = StateGraph(ShopSenseState)
 
+    builder.add_node("input_gate", input_gate_node)
     builder.add_node("memory", memory_node)
+    builder.add_node("output_rail", output_rail_node)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("order_agent", order_agent_node)
     builder.add_node("policy_agent", policy_agent_node)
@@ -91,7 +95,17 @@ def build_graph(checkpointer=None):
     # too long, and load the customer's profile if we now know who they are.
     # Doing this FIRST means the supervisor and specialists read the
     # compressed transcript - compressing afterwards would save nothing.
-    builder.add_edge(START, "memory")
+    # The guardrail sandwich. Nothing reaches the agents unscreened, and
+    # nothing reaches the customer unchecked.
+    builder.add_edge(START, "input_gate")
+    builder.add_conditional_edges(
+        "input_gate",
+        route_after_gate,
+        # A blocked message skips EVERYTHING - no memory, no supervisor, no
+        # specialists. The gate already wrote the refusal; there is nothing
+        # left to decide, and no reason to pay a model to agree.
+        {"memory": "memory", "END": END},
+    )
     builder.add_edge("memory", "supervisor")
 
     # The one conditional edge in the system. route_from_state() reads
@@ -105,9 +119,12 @@ def build_graph(checkpointer=None):
         {
             "order_agent": "order_agent",
             "policy_agent": "policy_agent",
-            "FINISH": END,
+            # FINISH no longer means "done" - it means "ready to be
+            # checked". The last thing before END is always the rail.
+            "FINISH": "output_rail",
         },
     )
+    builder.add_edge("output_rail", END)
 
     # Specialists always report back rather than answering the customer
     # directly. This is what allows a question to need both of them, and
