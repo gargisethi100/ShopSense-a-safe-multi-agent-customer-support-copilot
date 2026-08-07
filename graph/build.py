@@ -62,8 +62,14 @@ from langgraph.types import Command
 from agents.order_agent import order_agent_node
 from agents.policy_agent import policy_agent_node
 from graph.approval import refund_approval_node, route_after_order_agent
+from graph.memory import hydrate_profile, save_profile, summarize_node
 from graph.state import ShopSenseState, format_cost_footer
 from graph.supervisor import route_from_state, supervisor_node
+
+
+def memory_node(state: ShopSenseState) -> dict:
+    """One node, two memory jobs - both cheap, both before any reasoning."""
+    return {**summarize_node(state), **hydrate_profile(state)}
 
 
 def build_graph(checkpointer=None):
@@ -75,13 +81,18 @@ def build_graph(checkpointer=None):
     """
     builder = StateGraph(ShopSenseState)
 
+    builder.add_node("memory", memory_node)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("order_agent", order_agent_node)
     builder.add_node("policy_agent", policy_agent_node)
     builder.add_node("refund_approval", refund_approval_node)
 
-    # Every turn starts at the supervisor.
-    builder.add_edge(START, "supervisor")
+    # Every turn starts with memory: compress the transcript if it has grown
+    # too long, and load the customer's profile if we now know who they are.
+    # Doing this FIRST means the supervisor and specialists read the
+    # compressed transcript - compressing afterwards would save nothing.
+    builder.add_edge(START, "memory")
+    builder.add_edge("memory", "supervisor")
 
     # The one conditional edge in the system. route_from_state() reads
     # state["route"] (already decided by supervisor_node) and returns a
@@ -280,6 +291,18 @@ def chat() -> None:
         )
         print(f"\nbot > {answer.text if answer else '(no answer produced)'}")
         print(f"      [{format_cost_footer(result)}]")
+
+    # SESSION END. Distilling the profile here - after the customer has
+    # gone - is the whole point: it costs a model call, and no customer
+    # should ever wait for it. The conversation itself is already safe in
+    # Postgres; this is the part that outlives the thread.
+    final = graph.get_state(config).values
+    if final.get("customer_id"):
+        print("\nupdating customer profile...", end=" ", flush=True)
+        profile = save_profile(final)
+        print("done" if profile else "nothing durable to save")
+        if profile:
+            print("\n  " + profile.replace("\n", "\n  "))
 
     print("\nConversation saved. Resume it any time with the same thread_id.")
 

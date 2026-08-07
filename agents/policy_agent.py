@@ -40,6 +40,7 @@ from langchain_core.messages import (
 )
 
 from config import get_settings
+from graph.memory import summary_preamble
 from graph.state import ShopSenseState
 from llm import get_llm, usage_from
 from tools.policy_tools import POLICY_TOOLS
@@ -85,7 +86,11 @@ def policy_agent_node(state: ShopSenseState) -> dict:
     settings = get_settings()
     llm = get_llm("agent").bind_tools(TOOLS)
 
-    convo = [SystemMessage(content=SYSTEM_PROMPT), *(state.get("messages") or [])]
+    convo = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        *summary_preamble(state),
+        *(state.get("messages") or []),
+    ]
     new_messages: list = []
     usage_records: list[dict] = []
     flags: list[str] = []

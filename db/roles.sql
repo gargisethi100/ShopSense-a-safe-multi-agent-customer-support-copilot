@@ -111,12 +111,27 @@ GRANT SELECT, INSERT ON refunds TO refund_writer;
 -- (With SERIAL ids, INSERT would also need GRANT USAGE ON the sequence —
 --  a classic "why is my insert failing" trap you get to skip.)
 
+-- Phase 6 (memory): the per-customer profile store.
+--
+-- WHY graph_writer AND NOT agent_ro: a profile is distilled CONVERSATION,
+-- not business data - so it belongs to the role that already owns
+-- conversation storage (the checkpointer). The specialists deliberately
+-- cannot write here: an agent that could edit its own memory of you is a
+-- much harder thing to reason about than one that only reads what a
+-- separate, auditable step wrote.
+--
+-- No DELETE: a profile is corrected by rewriting it (UPDATE), and erasing
+-- one is an operator action, not something the app does mid-conversation.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'graph_writer') THEN
+        GRANT SELECT, INSERT, UPDATE ON user_profiles TO graph_writer;
+    END IF;
+END
+$$;
+
 -- ---------------------------------------------------------------------------
 -- Deliberately NOT granted yet (each arrives with the phase that needs it):
---
---   user_profiles  -> Phase 6 (memory). The profile reader/writer grant is
---                     added when we build that feature, not before. Grants
---                     should trace to a feature that exists.
 --
 --   LangGraph checkpoint tables -> Phase 4. PostgresSaver creates and owns
 --                     its own tables; we'll decide its connection identity

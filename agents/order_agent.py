@@ -36,6 +36,8 @@ Run directly (needs a seeded database + Bedrock):
 
 from __future__ import annotations
 
+import re
+
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -44,6 +46,7 @@ from langchain_core.messages import (
 )
 
 from config import get_settings
+from graph.memory import summary_preamble
 from graph.state import ShopSenseState
 from llm import get_llm, usage_from
 from tools.order_tools import ORDER_TOOLS
@@ -93,11 +96,20 @@ def order_agent_node(state: ShopSenseState) -> dict:
     # The conversation as the model sees it: our instructions + the real
     # transcript. `state["messages"]` is never mutated - we build a local
     # working list and return only what's new.
-    convo = [SystemMessage(content=SYSTEM_PROMPT), *(state.get("messages") or [])]
+    # summary_preamble injects the rolling summary and the customer's
+    # profile as context. It is spliced in HERE rather than stored in
+    # state["messages"], so it never becomes part of the transcript it
+    # describes (and never gets summarised into itself).
+    convo = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        *summary_preamble(state),
+        *(state.get("messages") or []),
+    ]
     new_messages: list = []
     usage_records: list[dict] = []
     flags: list[str] = []
     pending_refund: dict | None = None
+    customer_id: str | None = state.get("customer_id")
 
     for round_no in range(MAX_TOOL_ROUNDS + 1):
         reply: AIMessage = llm.invoke(convo)
@@ -192,6 +204,14 @@ def order_agent_node(state: ShopSenseState) -> dict:
                     "say the money is on its way."
                 )
 
+            # Capture the customer's identity the moment it is established.
+            # This is what lets Phase 6's memory load their profile and
+            # save it afterwards - and it is read from the TOOL RESULT (a
+            # database fact), never from what the customer claimed.
+            if call["name"] == "find_customer" and not customer_id:
+                if m := re.search(r"customer_id: (cust_\d+)", str(result)):
+                    customer_id = m.group(1)
+
             msg = ToolMessage(content=str(result), tool_call_id=call["id"])
             convo.append(msg)
             new_messages.append(msg)
@@ -206,6 +226,7 @@ def order_agent_node(state: ShopSenseState) -> dict:
         "usage": usage_records,
         **({"gate_flags": flags} if flags else {}),
         **({"pending_refund": pending_refund} if pending_refund else {}),
+        **({"customer_id": customer_id} if customer_id else {}),
     }
 
 

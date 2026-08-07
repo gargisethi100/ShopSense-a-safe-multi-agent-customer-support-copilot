@@ -111,6 +111,10 @@ class ShopSenseState(TypedDict, total=False):
     # output rail and the trace log can see WHY a turn went the way it did.
     gate_flags: Annotated[list[str], lambda old, new: (old or []) + (new or [])]
 
+    # True when the input gate refused the message outright. Replaced (not
+    # appended) every turn: it describes THIS message, not the history.
+    gate_blocked: bool | None
+
     # --- human-in-the-loop (Phase 5) -----------------------------------
     # The pending RefundRequest, as a plain dict, while the graph is
     # paused at interrupt(). The UI renders this into the approval panel.
