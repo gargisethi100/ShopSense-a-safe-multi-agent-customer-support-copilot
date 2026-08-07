@@ -128,16 +128,68 @@ def load_chunks(docs_dir: Path = DOCS_DIR) -> list[Chunk]:
     return chunks
 
 
-def _tokenize(text: str) -> list[str]:
-    """Text -> lowercase word list. BM25 compares TOKENS, not strings.
+# Words that carry no topical signal. Removing them looks optional and is
+# NOT - see the bug note in _tokenize below.
+_STOPWORDS = frozenset("""
+a an the this that these those and or but if then so of in on at to for from
+by with without within as is are was were be been being do does did doing
+have has had having i you he she it we they me my your our their there here
+what which who whom how when where why can could may might shall should will
+would must not no nor only own same than too very s t just also about into
+over under again further once
+""".split())
 
-    Deliberately dumb: lowercase, split on anything non-alphanumeric.
-    'Delivered,' and 'delivered' must count as the same word - that's all
-    we need. (Real engines add stemming so 'refunds' matches 'refund';
-    at our corpus size the plural usually appears anyway. Simplest thing
-    that works, seam left for better.)
+
+def _stem(word: str) -> str:
+    """Crude suffix stripper so 'items' and 'item' count as one word.
+
+    BUG THIS FIXES (found live by the policy agent, 2026-08): asked "how
+    long do I have to return an ITEM", BM25 scored RET-1 ("...ITEMS may be
+    returned within 30 days...") low, because 'item' and 'items' are
+    different strings. The agent then correctly refused to state a return
+    window it could not see - a RETRIEVAL failure wearing a generation
+    failure's clothes.
+
+    Deliberately not a real stemmer (no NLTK dependency for 17 documents).
+    It does not have to be linguistically right - it has to be CONSISTENT,
+    because both the query and the documents pass through it. 'process' and
+    'processing' both collapsing to 'proces' is fine; they still match.
     """
-    return re.findall(r"[a-z0-9]+", text.lower())
+    if len(word) <= 3:
+        return word
+    if word.endswith("ies") and len(word) > 4:
+        word = word[:-3] + "y"
+    elif word.endswith("ss"):
+        pass                                    # business, address: keep
+    elif word.endswith("es") and len(word) > 4:
+        word = word[:-2]
+    elif word.endswith("s"):
+        word = word[:-1]                        # items -> item
+    if word.endswith("ing") and len(word) > 5:
+        word = word[:-3]                        # shipping -> shipp
+    elif word.endswith("ed") and len(word) > 4:
+        word = word[:-2]                        # returned -> return
+    if len(word) > 3 and word[-1] == word[-2]:
+        word = word[:-1]                        # shipp -> ship
+    if word.endswith("e") and len(word) > 4:
+        word = word[:-1]                        # damage/damaged -> damag
+    return word
+
+
+def _tokenize(text: str) -> list[str]:
+    """Text -> comparable word list. BM25 compares TOKENS, not strings.
+
+    Three steps, and the last two were added after a real miss:
+      1. lowercase + split on non-alphanumerics ('Delivered,' -> 'delivered')
+      2. DROP STOPWORDS. BM25's rarity heuristic assumes a big corpus: a
+         word in few documents looks like signal. With 17 sections, 'do'
+         and 'have' appear in only two or three - so BM25 rated them
+         HIGHLY informative and let an irrelevant chunk outrank the right
+         one on filler words alone.
+      3. STEM, so singular/plural and tense variants match (see _stem).
+    """
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return [_stem(w) for w in words if w not in _STOPWORDS]
 
 
 # ---------------------------------------------------------------------------
@@ -145,12 +197,54 @@ def _tokenize(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+# How many times the section TITLE is repeated in the indexed text.
+# A title is a human's summary of what the section is ABOUT, so a title
+# match is stronger evidence than a body match - but BM25 has no notion of
+# fields, only a bag of words. Repeating the title is the standard poor
+# man's field boost: it raises the title's term frequency without needing
+# a different ranking library.
+_TITLE_BOOST = 3
+
+# "...within the [RET-1] window" - our policy docs cross-reference each
+# other by section id. That is a hand-authored relevance signal sitting
+# right there in the corpus, so we follow it (see _expand_citations).
+_XREF = re.compile(r"\[([A-Z]+-\d+)\]")
+
+
 class BM25Retriever:
     def __init__(self, docs_dir: Path = DOCS_DIR):
         self.chunks = load_chunks(docs_dir)
+        self._by_id = {c.section_id: c for c in self.chunks}
         # The index: every chunk pre-tokenized once, at startup. Queries
         # then only pay for scoring - no re-reading files per question.
-        self._bm25 = BM25Okapi([_tokenize(c.text) for c in self.chunks])
+        self._bm25 = BM25Okapi(
+            [_tokenize(f"{(c.title + ' ') * _TITLE_BOOST}{c.text}") for c in self.chunks]
+        )
+
+    def _expand_citations(self, hits: list[Chunk], limit: int) -> list[Chunk]:
+        """Pull in sections that the hits explicitly point at.
+
+        WHY THIS EXISTS (the honest version): BM25 matches WORDS, and a
+        customer's words often aren't the policy's. Asked "how long do I
+        have to return an item", it ranks [RET-2] "What can and cannot be
+        returned" highly - and RET-2's own text says "within the [RET-1]
+        window". The document is telling us where the answer is. Following
+        that link costs nothing and needs no model.
+
+        This is a cheap stand-in for semantic search, and it only works
+        because the corpus was WRITTEN with cross-references. Where the
+        docs don't link, the vocabulary gap remains - which is exactly the
+        evidence for the embeddings upgrade, now backed by measurement
+        instead of assumption.
+        """
+        seen = {c.section_id for c in hits}
+        extra: list[Chunk] = []
+        for c in hits:
+            for ref in _XREF.findall(c.text):
+                if ref not in seen and ref in self._by_id and len(extra) < limit:
+                    seen.add(ref)
+                    extra.append(self._by_id[ref])
+        return extra
 
     def search(self, query: str, k: int = 3) -> list[Chunk]:
         """Top-k chunks for the query, best first.
@@ -167,13 +261,23 @@ class BM25Retriever:
         # Returning such chunks anyway would hand the model authoritative-
         # looking-but-irrelevant text - worse than returning nothing,
         # because the model TRUSTS what we paste into its prompt.
-        return [self.chunks[i] for i in ranked[:k] if scores[i] > 0]
+        hits = [self.chunks[i] for i in ranked[:k] if scores[i] > 0]
+        # Cross-referenced sections ride along, capped so a chain of links
+        # can't quietly balloon the prompt.
+        return hits + self._expand_citations(hits, limit=2)
 
     def search_scored(self, query: str, k: int = 3) -> list[tuple[float, Chunk]]:
-        """Same, with scores visible - for debugging and the smoke test."""
+        """Same, with scores visible - for debugging and the smoke test.
+
+        Cross-referenced sections appear with score 0.0: they were not
+        matched, they were FOLLOWED. Keeping that visible stops a debugging
+        session from crediting the ranker for a link's work.
+        """
         scores = self._bm25.get_scores(_tokenize(query))
         ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
-        return [(scores[i], self.chunks[i]) for i in ranked[:k] if scores[i] > 0]
+        hits = [(scores[i], self.chunks[i]) for i in ranked[:k] if scores[i] > 0]
+        expanded = self._expand_citations([c for _, c in hits], limit=2)
+        return hits + [(0.0, c) for c in expanded]
 
 
 @lru_cache(maxsize=1)

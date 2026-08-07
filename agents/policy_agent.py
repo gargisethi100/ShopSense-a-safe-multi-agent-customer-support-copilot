@@ -189,6 +189,12 @@ if __name__ == "__main__":
     ]
 
     CITATION = re.compile(r"\[[A-Z]+-\d+\]")
+    # Excerpt headers look like: '--- [RET-1] Return window (returns.md) ---'.
+    # Match THOSE, not every bracketed id in the result - the citation
+    # contract line contains a "[RET-1]" as an EXAMPLE, and counting it as a
+    # retrieval hit made the first run look like RET-1 was found when it
+    # wasn't. A debugging display that lies costs more than no display.
+    RETRIEVED = re.compile(r"^--- \[([A-Z]+-\d+)\]", re.MULTILINE)
 
     print(f"agent model: {get_settings().model_agent}\n")
     total = 0.0
@@ -202,7 +208,7 @@ if __name__ == "__main__":
                 for c in m.tool_calls:
                     print(f"  tool  : {c['name']}({c['args']})")
             elif isinstance(m, ToolMessage):
-                sections = CITATION.findall(str(m.content))
+                sections = RETRIEVED.findall(str(m.content))
                 print(f"  found : {', '.join(sections) or '(nothing relevant)'}")
 
         answer = out["messages"][-1].text
