@@ -57,8 +57,11 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 
+from langgraph.types import Command
+
 from agents.order_agent import order_agent_node
 from agents.policy_agent import policy_agent_node
+from graph.approval import refund_approval_node, route_after_order_agent
 from graph.state import ShopSenseState, format_cost_footer
 from graph.supervisor import route_from_state, supervisor_node
 
@@ -75,6 +78,7 @@ def build_graph(checkpointer=None):
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("order_agent", order_agent_node)
     builder.add_node("policy_agent", policy_agent_node)
+    builder.add_node("refund_approval", refund_approval_node)
 
     # Every turn starts at the supervisor.
     builder.add_edge(START, "supervisor")
@@ -97,7 +101,17 @@ def build_graph(checkpointer=None):
     # Specialists always report back rather than answering the customer
     # directly. This is what allows a question to need both of them, and
     # it gives the supervisor one last look before the turn ends.
-    builder.add_edge("order_agent", "supervisor")
+    #
+    # The order agent has one detour: if it parked a refund proposal in
+    # state, the run must pass through the human gate BEFORE anyone
+    # summarises anything. Note this edge is data-driven, not model-driven -
+    # the supervisor gets no say in whether a human is consulted.
+    builder.add_conditional_edges(
+        "order_agent",
+        route_after_order_agent,
+        {"refund_approval": "refund_approval", "supervisor": "supervisor"},
+    )
+    builder.add_edge("refund_approval", "supervisor")
     builder.add_edge("policy_agent", "supervisor")
 
     return builder.compile(checkpointer=checkpointer)
@@ -223,6 +237,32 @@ def chat() -> None:
         # .invoke() runs the whole flowchart: supervisor -> specialist(s) ->
         # supervisor -> END, checkpointing after every step.
         result = graph.invoke({"messages": [HumanMessage(content=text)]}, config)
+
+        # ...unless a node called interrupt(), in which case .invoke()
+        # returns EARLY with the payload under "__interrupt__" and the run
+        # is frozen in Postgres. Here we approve inline; in Phase 9 the
+        # same payload renders as a panel with Approve/Reject buttons, and
+        # the process could restart in between without losing anything.
+        while "__interrupt__" in result:
+            payload = result["__interrupt__"][0].value
+            r = payload["refund"]
+            print("\n" + "=" * 60)
+            print("  HUMAN APPROVAL REQUIRED - the graph is paused")
+            print("=" * 60)
+            print(f"  refund id : {r['refund_id']}")
+            print(f"  customer  : {r['customer_name']} ({r['customer_id']})")
+            print(f"  order     : {r['order_id']}  ({r['product_name']})")
+            print(f"  amount    : ${r['amount_usd']}")
+            print(f"  reason    : {r['reason']}")
+            answer = input("  approve? [y/N] > ").strip().lower()
+            decision = {
+                "approved": answer in {"y", "yes"},
+                "approved_by": "cli-operator",
+                "note": "" if answer in {"y", "yes"} else "declined at CLI",
+            }
+            # Command(resume=...) restarts the interrupted node, with the
+            # value above coming back OUT of the interrupt() call.
+            result = graph.invoke(Command(resume=decision), config)
 
         # Show the internal steps, then the answer. In the Streamlit UI
         # (Phase 9) the steps get hidden and only the answer is shown.

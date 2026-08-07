@@ -47,7 +47,7 @@ from config import get_settings
 from graph.state import ShopSenseState
 from llm import get_llm, usage_from
 from tools.order_tools import ORDER_TOOLS
-from tools.refund_tool import REFUND_TOOLS
+from tools.refund_tool import REFUND_TOOLS, RefundRequest
 
 # Every tool this specialist may hold. Notice what is absent: the policy
 # search. A specialist that could do everything would be the single big
@@ -97,6 +97,7 @@ def order_agent_node(state: ShopSenseState) -> dict:
     new_messages: list = []
     usage_records: list[dict] = []
     flags: list[str] = []
+    pending_refund: dict | None = None
 
     for round_no in range(MAX_TOOL_ROUNDS + 1):
         reply: AIMessage = llm.invoke(convo)
@@ -172,14 +173,39 @@ def order_agent_node(state: ShopSenseState) -> dict:
                     )
                     flags.append(f"order_agent: bad args for {call['name']}")
 
+            # A RefundRequest object (rather than a string) means the refund
+            # tool VALIDATED a refund and is handing us a proposal. Park it
+            # in state; the graph will route to the human-approval node
+            # instead of returning to the supervisor.
+            #
+            # model_dump(mode="json") matters: the payload is checkpointed
+            # to Postgres as JSON, and a raw Decimal amount is not JSON
+            # serialisable. Pydantic renders it as a string here and parses
+            # it back to Decimal on the way out - exact cents, intact.
+            if isinstance(result, RefundRequest):
+                pending_refund = result.model_dump(mode="json")
+                result = (
+                    f"REFUND PREPARED (id {result.refund_id}): "
+                    f"${result.amount_usd:.2f} for order {result.order_id}. "
+                    "It is now waiting for a human to approve it. Tell the "
+                    "customer the request is submitted for review - do NOT "
+                    "say the money is on its way."
+                )
+
             msg = ToolMessage(content=str(result), tool_call_id=call["id"])
             convo.append(msg)
             new_messages.append(msg)
+
+        # Stop looping once a refund is parked: the human decides next, and
+        # anything the model says now would pre-empt that decision.
+        if pending_refund:
+            break
 
     return {
         "messages": new_messages,
         "usage": usage_records,
         **({"gate_flags": flags} if flags else {}),
+        **({"pending_refund": pending_refund} if pending_refund else {}),
     }
 
 

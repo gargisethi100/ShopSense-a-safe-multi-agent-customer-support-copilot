@@ -215,7 +215,7 @@ def execute_refund(request: RefundRequest, approved_by: str) -> str:
 
 
 @tool("request_refund", args_schema=RequestRefundArgs)
-def request_refund(order_id: str, reason: str) -> str:
+def request_refund(order_id: str, reason: str) -> RefundRequest | str:
     """Request a refund for a delivered order. A HUMAN must approve it.
 
     WHAT: Validates that the order is refundable and submits a refund
@@ -237,30 +237,19 @@ def request_refund(order_id: str, reason: str) -> str:
     or confirmation that the refund is awaiting human approval - tell the
     customer approval is pending, and do NOT promise the money is sent.
     """
-    prepared = prepare_refund(order_id, reason)
-    if isinstance(prepared, str):
-        return prepared
-
-    # =======================================================================
-    # PHASE 5 SEAM - THE HUMAN GATE GOES EXACTLY HERE.
+    # PHASE 5: the return type is the seam.
     #
-    # When the graph exists, this becomes:
+    # A rejection comes back as a STRING - plain advice the model relays.
+    # A valid proposal comes back as a RefundRequest OBJECT, and that type
+    # difference is the signal: order_agent_node sees an object, parks it in
+    # state["pending_refund"], and the graph routes to the approval node
+    # instead of straight back to the supervisor.
     #
-    #     decision = interrupt(prepared.model_dump())   # freezes the run
-    #     if decision["approved"]:
-    #         return execute_refund(prepared, decision["approved_by"])
-    #     return f"Refund DECLINED by {decision['approved_by']}: ..."
-    #
-    # Until then the tool stops here, honestly. It does NOT auto-approve:
-    # a stub that "temporarily" writes is a production incident on layaway.
-    # =======================================================================
-    return (
-        f"REFUND PREPARED (id {prepared.refund_id}) for order "
-        f"{prepared.order_id}: ${prepared.amount_usd:.2f} to "
-        f"{prepared.customer_name} - reason: {prepared.reason}. "
-        "STATUS: awaiting human approval. The approval flow is not wired "
-        "yet (arrives in Phase 5); no money has moved."
-    )
+    # Why the tool does NOT call interrupt() itself - see graph/approval.py:
+    # resuming REPLAYS the whole node, so an interrupt raised from inside
+    # the agent's reasoning loop would re-run (and re-bill) every LLM call
+    # in it. The pause belongs in a node that is cheap to replay.
+    return prepare_refund(order_id, reason)
 
 
 REFUND_TOOLS = [request_refund]
@@ -281,10 +270,12 @@ if __name__ == "__main__":
         print(f"\n-- {label} ({oid})")
         print(request_refund.invoke({"order_id": oid, "reason": "item arrived damaged"}))
 
-    print("\n=== the tool via the agent path (stub - must NOT write) ===")
-    print(request_refund.invoke(
+    print("\n=== the tool via the agent path (returns an OBJECT, writes nothing) ===")
+    out = request_refund.invoke(
         {"order_id": "ord_1003", "reason": "left ear cup crackles at low volume"}
-    ))
+    )
+    print(f"  type    : {type(out).__name__}  <- not a string: a pending proposal")
+    print(f"  payload : {out}")
 
     print("\n=== full pipeline rehearsal (prepare -> 'approve' -> execute) ===")
     prepared = prepare_refund("ord_1003", "left ear cup crackles at low volume")
