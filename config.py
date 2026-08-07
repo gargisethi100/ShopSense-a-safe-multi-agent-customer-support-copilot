@@ -233,6 +233,7 @@ class Settings(BaseSettings):
     db_url_admin: str = ""  # owner: migrations + seeding. Never used at runtime.
     db_url_ro: str = ""  # agent_ro: SELECT on three tables, nothing else.
     db_url_writer: str = ""  # refund_writer: the single write path.
+    db_url_graph: str = ""  # graph_writer: LangGraph checkpoints ONLY.
 
     # --- models -----------------------------------------------------------
     # Defaults are what THIS account can actually invoke (Phase 3.5 probe).
@@ -327,17 +328,19 @@ class Settings(BaseSettings):
                 "per-region; `python llm.py list` shows what yours offers."
             )
 
-    def require_db_url(self, which: Literal["admin", "ro", "writer"]) -> str:
+    def require_db_url(self, which: Literal["admin", "ro", "writer", "graph"]) -> str:
         value = {
             "admin": self.db_url_admin,
             "ro": self.db_url_ro,
             "writer": self.db_url_writer,
+            "graph": self.db_url_graph,
         }[which]
         if not value:
             raise RuntimeError(
                 f"SHOPSENSE_DB_URL_{which.upper()} is empty.\n"
                 "  - 'admin' comes from Neon when you create the project.\n"
-                "  - 'ro' and 'writer' exist only after db/roles.sql is applied."
+                "  - 'ro' and 'writer' exist only after db/roles.sql is applied.\n"
+                "  - 'graph' is created by `python -m graph.build setup`."
             )
         return value
 
@@ -391,6 +394,7 @@ class Settings(BaseSettings):
             f"  db admin          : {db(self.db_url_admin)}",
             f"  db read-only      : {db(self.db_url_ro)}",
             f"  db writer         : {db(self.db_url_writer)}",
+            f"  db graph          : {db(self.db_url_graph)}",
         ]
         return "\n".join(lines)
 

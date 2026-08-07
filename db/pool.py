@@ -102,6 +102,30 @@ def get_writer_pool() -> ConnectionPool:
     return _make_pool(url, name="shopsense-writer", autocommit=False)
 
 
+@lru_cache(maxsize=1)
+def get_graph_pool() -> ConnectionPool:
+    """The checkpointer's pool (role: graph_writer). LangGraph's tables only.
+
+    Two connection settings here are REQUIREMENTS of langgraph's
+    PostgresSaver, not preferences:
+      * autocommit=True - it manages its own transactions
+      * row_factory=dict_row - it reads results by column NAME
+    Getting either wrong produces confusing errors deep inside the library,
+    so they live here once rather than at each call site.
+    """
+    from psycopg.rows import dict_row
+
+    url = get_settings().require_db_url("graph")
+    return ConnectionPool(
+        conninfo=url,
+        min_size=1,
+        max_size=4,
+        name="shopsense-graph",
+        kwargs={"autocommit": True, "row_factory": dict_row},
+        open=True,
+    )
+
+
 @atexit.register
 def close_pools() -> None:
     """Shut the pools down cleanly when the process ends.
@@ -116,7 +140,7 @@ def close_pools() -> None:
     rather than calling get_ro_pool() - which would helpfully CREATE a pool
     at shutdown just to close it. Cleanup must never allocate.
     """
-    for getter in (get_ro_pool, get_writer_pool):
+    for getter in (get_ro_pool, get_writer_pool, get_graph_pool):
         if getter.cache_info().currsize:
             getter().close()
 
