@@ -130,13 +130,24 @@ def load_chunks(docs_dir: Path = DOCS_DIR) -> list[Chunk]:
 
 # Words that carry no topical signal. Removing them looks optional and is
 # NOT - see the bug note in _tokenize below.
+#
+# THIS LIST GREW FROM FAILURES, which is how stopword lists are actually
+# built. "other" was added after an eval caught "do you price match with
+# other stores?" retrieving the warranty exclusions - it matched a single
+# word, in "repair attempts by anyone OTHER than ShopSense", and scored
+# 2.20: HIGHER than a legitimate query's 1.63. That is the lesson under
+# the lesson - at this corpus size a BM25 score is not a usable relevance
+# threshold, because one rare filler word can outscore a real match. The
+# fix is to stop treating filler as signal, not to tune a cutoff.
 _STOPWORDS = frozenset("""
 a an the this that these those and or but if then so of in on at to for from
 by with without within as is are was were be been being do does did doing
 have has had having i you he she it we they me my your our their there here
 what which who whom how when where why can could may might shall should will
 would must not no nor only own same than too very s t just also about into
-over under again further once
+over under again further once other others another some any each few more
+most such both all out up down off before after above below between through
+during until while because please want need get got make made take see look
 """.split())
 
 
