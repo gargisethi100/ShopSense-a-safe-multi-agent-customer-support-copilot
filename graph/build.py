@@ -67,6 +67,7 @@ from graph.state import ShopSenseState, format_cost_footer
 from graph.supervisor import route_from_state, supervisor_node
 from guards.input_gate import input_gate_node, route_after_gate
 from guards.output_rail import output_rail_node
+from obs.costlog import record_run, trace_config, tracing_status
 
 
 def memory_node(state: ShopSenseState) -> dict:
@@ -246,13 +247,16 @@ def chat() -> None:
     thread_id = f"cli-{uuid.uuid4().hex[:8]}"
     # thread_id IS the conversation's identity. Same id -> same history,
     # loaded from Postgres. Change it and you are a different customer.
-    config = {"configurable": {"thread_id": thread_id}}
+    # trace_config adds tags/metadata so the run is findable in LangSmith.
+    config = trace_config(thread_id)
 
     print(f"ShopSense CLI  (thread {thread_id})")
+    print(f"tracing: {tracing_status()}")
     print("Type a question, or 'quit'. Try:")
     print("  where is order ord_1003?")
     print("  how long do I have to return it?     <- tests memory across turns")
     print("-" * 60)
+    logged = 0  # usage records already written to the cost log
 
     while True:
         try:
@@ -308,6 +312,13 @@ def chat() -> None:
         )
         print(f"\nbot > {answer.text if answer else '(no answer produced)'}")
         print(f"      [{format_cost_footer(result)}]")
+
+        # One line per turn, appended locally. The footer above is
+        # CUMULATIVE (what this conversation has cost so far - what the
+        # customer sees); the log records only THIS turn's delta, which is
+        # why `logged` is threaded through. Same numbers, two questions.
+        record_run(result, thread_id=thread_id, question=text, since=logged)
+        logged = len(result.get("usage") or [])
 
     # SESSION END. Distilling the profile here - after the customer has
     # gone - is the whole point: it costs a model call, and no customer
