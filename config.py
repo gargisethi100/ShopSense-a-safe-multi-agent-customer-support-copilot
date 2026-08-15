@@ -220,6 +220,20 @@ class Settings(BaseSettings):
         env_prefix="SHOPSENSE_",
         extra="ignore",  # don't explode on unrelated vars in the environment
         frozen=True,  # config is read-only after load; no spooky action at a distance
+        # TREAT AN EMPTY VALUE AS ABSENT - added after CI failed on it.
+        #
+        # GitHub Actions substitutes ${{ secrets.FOO }} with an EMPTY STRING
+        # when FOO does not exist, rather than leaving the variable unset. So
+        # a workflow that forwards secrets you have not created yet exports
+        # SHOPSENSE_MODEL_AGENT="" - and the model validator below correctly
+        # rejected "" as an unknown model, crashing test collection before a
+        # single test ran.
+        #
+        # "Absent" and "empty" are different states in Python and identical
+        # in most CI systems. This setting reconciles the two: an empty value
+        # falls back to the default instead of being validated as a real
+        # answer. Worth remembering wherever config crosses a shell boundary.
+        env_ignore_empty=True,
     )
 
     # --- credentials ------------------------------------------------------
