@@ -112,6 +112,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Buildx
+        # Required for `cache-from/to: type=gha`. The default docker driver
+        # cannot read or write the GitHub Actions cache; buildx can. Omit
+        # this and the build still works but silently rebuilds every layer
+        # on every push - a caching feature that quietly does nothing.
+        uses: docker/setup-buildx-action@v3
+
       - name: Build image
         # `load: false, push: false` means BUILD ONLY - we are asking one
         # question ("is the Dockerfile still valid?") and answering it
@@ -151,6 +158,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Get AWS credentials via OIDC
         # NO LONG-LIVED AWS KEYS IN GITHUB. Instead, GitHub proves this
