@@ -51,6 +51,7 @@ Run:
 from __future__ import annotations
 
 import sys
+import time
 import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -64,7 +65,7 @@ from agents.policy_agent import policy_agent_node
 from graph.approval import refund_approval_node, route_after_order_agent
 from graph.memory import hydrate_profile, save_profile, summarize_node
 from graph.state import ShopSenseState, format_cost_footer
-from graph.supervisor import route_from_state, supervisor_node
+from graph.supervisor import direct_reply_node, route_from_state, supervisor_node
 from guards.input_gate import input_gate_node, route_after_gate
 from guards.output_rail import output_rail_node
 from obs.costlog import record_run, trace_config, tracing_status
@@ -73,6 +74,36 @@ from obs.costlog import record_run, trace_config, tracing_status
 def memory_node(state: ShopSenseState) -> dict:
     """One node, two memory jobs - both cheap, both before any reasoning."""
     return {**summarize_node(state), **hydrate_profile(state)}
+
+
+def timed(name: str, fn):
+    """Wrap a node so it reports how long it took.
+
+    WHY A WRAPPER AND NOT A LINE IN EVERY NODE
+    Timing is a CROSS-CUTTING concern: every node needs it, no node's job
+    is about it. Adding `t0 = time.perf_counter()` to seven functions
+    means seven chances to forget, seven chances to name the field
+    differently, and seven diffs to review the day the format changes.
+    Wrapping at the wiring layer means nodes stay about their own logic
+    and new nodes are instrumented automatically the moment they are
+    added below.
+
+    perf_counter, not time(): it is monotonic, so an NTP clock adjustment
+    mid-request cannot produce a negative duration.
+
+    Note there is no try/finally. If a node raises - including the
+    GraphInterrupt that pauses for refund approval - the exception must
+    propagate untouched. A node that did not finish has no honest
+    duration, and swallowing an interrupt to record a number would break
+    the human gate to improve a metric.
+    """
+    def wrapper(state: ShopSenseState) -> dict:
+        started = time.perf_counter()
+        out = fn(state)
+        return {**out, "timings": [{"node": name, "seconds": time.perf_counter() - started}]}
+
+    wrapper.__name__ = name
+    return wrapper
 
 
 def build_graph(checkpointer=None):
@@ -84,13 +115,19 @@ def build_graph(checkpointer=None):
     """
     builder = StateGraph(ShopSenseState)
 
-    builder.add_node("input_gate", input_gate_node)
-    builder.add_node("memory", memory_node)
-    builder.add_node("output_rail", output_rail_node)
-    builder.add_node("supervisor", supervisor_node)
-    builder.add_node("order_agent", order_agent_node)
-    builder.add_node("policy_agent", policy_agent_node)
-    builder.add_node("refund_approval", refund_approval_node)
+    # Every node goes through timed(), so latency is measured for free and
+    # a node added tomorrow is instrumented without anyone remembering to.
+    for name, fn in [
+        ("input_gate", input_gate_node),
+        ("memory", memory_node),
+        ("supervisor", supervisor_node),
+        ("order_agent", order_agent_node),
+        ("policy_agent", policy_agent_node),
+        ("refund_approval", refund_approval_node),
+        ("direct_reply", direct_reply_node),
+        ("output_rail", output_rail_node),
+    ]:
+        builder.add_node(name, timed(name, fn))
 
     # Every turn starts with memory: compress the transcript if it has grown
     # too long, and load the customer's profile if we now know who they are.
@@ -123,8 +160,14 @@ def build_graph(checkpointer=None):
             # FINISH no longer means "done" - it means "ready to be
             # checked". The last thing before END is always the rail.
             "FINISH": "output_rail",
+            # ...unless nothing has actually answered the customer yet, in
+            # which case the supervisor speaks for itself (greetings,
+            # thanks, "what can you do?"). Without this branch those turns
+            # end in silence.
+            "direct_reply": "direct_reply",
         },
     )
+    builder.add_edge("direct_reply", "output_rail")
     builder.add_edge("output_rail", END)
 
     # Specialists always report back rather than answering the customer
@@ -257,6 +300,7 @@ def chat() -> None:
     print("  how long do I have to return it?     <- tests memory across turns")
     print("-" * 60)
     logged = 0  # usage records already written to the cost log
+    timed = 0   # timing records already written
 
     while True:
         try:
@@ -317,8 +361,10 @@ def chat() -> None:
         # CUMULATIVE (what this conversation has cost so far - what the
         # customer sees); the log records only THIS turn's delta, which is
         # why `logged` is threaded through. Same numbers, two questions.
-        record_run(result, thread_id=thread_id, question=text, since=logged)
+        record_run(result, thread_id=thread_id, question=text,
+                   since=logged, since_timings=timed)
         logged = len(result.get("usage") or [])
+        timed = len(result.get("timings") or [])
 
     # SESSION END. Distilling the profile here - after the customer has
     # gone - is the whole point: it costs a model call, and no customer

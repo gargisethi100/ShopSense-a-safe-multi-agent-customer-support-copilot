@@ -21,7 +21,12 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from graph.state import ShopSenseState
-from graph.supervisor import MAX_HOPS, RoutingDecision, supervisor_node
+from graph.supervisor import (
+    MAX_HOPS,
+    RoutingDecision,
+    route_from_state,
+    supervisor_node,
+)
 
 # (question, expected_route, prior_conversation)
 ROUTING_CASES = [
@@ -90,9 +95,52 @@ def test_refund_request_reaches_the_order_agent():
     assert supervisor_node(state)["route"] == "order_agent"
 
 
+@pytest.mark.live
+@pytest.mark.parametrize(
+    "greeting", ["hi", "hello there", "thanks!", "what can you help me with?"]
+)
+def test_conversational_turns_get_an_answer(greeting):
+    """Regression: 'hi' produced complete silence in the UI.
+
+    FINISH was overloaded - it meant both "a specialist already answered"
+    and "no specialist is needed" - so a greeting matched the second and
+    nobody replied. Found by a human typing the most obvious first message
+    there is, which is exactly the path developers never test.
+
+    The assertion is on the ROUTE, so it needs no model call beyond the
+    supervisor's own, and it fails loudly if the branch is ever removed.
+    """
+    state: ShopSenseState = {"messages": [HumanMessage(content=greeting)]}
+    supervisor_node(state)  # sets state["route"] via its return value
+    state["route"] = supervisor_node(state)["route"]
+    assert route_from_state(state) == "direct_reply", (
+        f"{greeting!r} would end the turn with no answer at all"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Free tier - no model needed
 # ---------------------------------------------------------------------------
+
+
+def test_finish_with_an_existing_answer_goes_straight_to_the_rail():
+    """The other half of the split: don't re-answer what's answered."""
+    state: ShopSenseState = {
+        "route": "FINISH",
+        "messages": [
+            HumanMessage(content="where is ord_1003?"),
+            AIMessage(content="It was delivered on Jul 23."),
+        ],
+    }
+    assert route_from_state(state) == "FINISH"
+
+
+def test_finish_with_no_answer_routes_to_direct_reply():
+    state: ShopSenseState = {
+        "route": "FINISH",
+        "messages": [HumanMessage(content="hi")],
+    }
+    assert route_from_state(state) == "direct_reply"
 
 
 def test_hop_cap_forces_finish_without_calling_the_model():

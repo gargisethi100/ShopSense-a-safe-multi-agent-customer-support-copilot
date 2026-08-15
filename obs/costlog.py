@@ -52,6 +52,15 @@ from graph.state import ShopSenseState
 RUN_LOG = Path(__file__).resolve().parent.parent / "runs" / "cost.jsonl"
 
 
+def _pct(values: list[float], p: int) -> float:
+    """The p-th percentile, nearest-rank. Small enough not to need numpy."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = min(int(round(p / 100 * len(ordered) + 0.5)) - 1, len(ordered) - 1)
+    return ordered[max(idx, 0)]
+
+
 # ---------------------------------------------------------------------------
 # LangSmith
 # ---------------------------------------------------------------------------
@@ -104,7 +113,12 @@ def trace_config(thread_id: str, *, customer_id: str | None = None) -> dict:
 
 
 def record_run(
-    state: ShopSenseState, *, thread_id: str, question: str = "", since: int = 0
+    state: ShopSenseState,
+    *,
+    thread_id: str,
+    question: str = "",
+    since: int = 0,
+    since_timings: int = 0,
 ) -> dict:
     """Append one line describing the turn that just finished.
 
@@ -128,11 +142,25 @@ def record_run(
     tout = sum(r["output_tokens"] for r in fresh)
     usd = sum(r["cost_usd"] for r in fresh)
 
-    by_node: dict[str, dict] = defaultdict(lambda: {"calls": 0, "cost_usd": 0.0})
+    # Timings accumulate exactly like usage, so they need the same
+    # so-far/just-now slicing. Same trap, same fix.
+    fresh_timings = (state.get("timings") or [])[since_timings:]
+    seconds = sum(t["seconds"] for t in fresh_timings)
+
+    by_node: dict[str, dict] = defaultdict(
+        lambda: {"calls": 0, "cost_usd": 0.0, "seconds": 0.0}
+    )
     for r in fresh:
         node = by_node[r["node"]]
         node["calls"] += 1
         node["cost_usd"] = round(node["cost_usd"] + r["cost_usd"], 6)
+    for t in fresh_timings:
+        # A node can appear here with zero LLM calls (the output rail, a
+        # blocked input gate) - those are pure latency, and pretending
+        # they are free is how a "cheap" turn still feels slow.
+        by_node[t["node"]]["seconds"] = round(
+            by_node[t["node"]]["seconds"] + t["seconds"], 3
+        )
 
     record = {
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -145,6 +173,7 @@ def record_run(
         "input_tokens": tin,
         "output_tokens": tout,
         "cost_usd": round(usd, 6),
+        "seconds": round(seconds, 3),
         "by_node": dict(by_node),
         # Guardrail activity is cost-adjacent: a blocked turn is a turn you
         # did NOT pay a specialist for, and that shows up here.
@@ -185,11 +214,17 @@ def analyze(runs: list[dict] | None = None) -> str:
     tokens = sum(r["input_tokens"] + r["output_tokens"] for r in runs)
     threads = {r["thread_id"] for r in runs}
 
-    by_node: dict[str, dict] = defaultdict(lambda: {"calls": 0, "cost_usd": 0.0})
+    seconds = [r.get("seconds", 0.0) for r in runs]
+    total_s = sum(seconds)
+
+    by_node: dict[str, dict] = defaultdict(
+        lambda: {"calls": 0, "cost_usd": 0.0, "seconds": 0.0}
+    )
     for r in runs:
         for node, stats in (r.get("by_node") or {}).items():
             by_node[node]["calls"] += stats["calls"]
             by_node[node]["cost_usd"] += stats["cost_usd"]
+            by_node[node]["seconds"] += stats.get("seconds", 0.0)
 
     lines = [
         "ShopSense cost report",
@@ -201,15 +236,25 @@ def analyze(runs: list[dict] | None = None) -> str:
         f"  llm calls         : {calls}   ({calls / len(runs):.1f} per turn)",
         f"  tokens            : {tokens:,}",
         "",
-        "  where the money goes",
+        # PERCENTILES, NOT AVERAGES, for latency. A mean hides the tail,
+        # and the tail is what people complain about: p95 is roughly "the
+        # worst experience 1 customer in 20 has". An app can have a fine
+        # average and still feel unreliable.
+        f"  latency  p50      : {_pct(seconds, 50):.1f}s",
+        f"           p95      : {_pct(seconds, 95):.1f}s"
+        + ("   <- the tail customers actually notice" if len(seconds) > 3 else ""),
+        f"           worst    : {max(seconds):.1f}s" if seconds else "",
+        "",
+        "  where the money and the TIME go",
         "  " + "-" * 58,
-        f"  {'node':16} {'calls':>6} {'cost':>10} {'share':>7}  {'$/call':>9}",
+        f"  {'node':16} {'calls':>6} {'cost':>9} {'$ share':>8} {'secs':>7} {'s share':>8}",
     ]
     for node, s in sorted(by_node.items(), key=lambda kv: -kv[1]["cost_usd"]):
         share = 100 * s["cost_usd"] / total if total else 0
+        s_share = 100 * s["seconds"] / total_s if total_s else 0
         lines.append(
-            f"  {node:16} {s['calls']:>6} {s['cost_usd']:>10.4f} {share:>6.1f}%"
-            f" {s['cost_usd'] / s['calls']:>9.5f}"
+            f"  {node:16} {s['calls']:>6} {s['cost_usd']:>9.4f} {share:>7.1f}%"
+            f" {s['seconds']:>7.1f} {s_share:>7.1f}%"
         )
 
     # The insight this table exists to surface: call COUNT and call COST

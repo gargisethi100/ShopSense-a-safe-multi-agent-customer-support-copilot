@@ -56,6 +56,14 @@ def get_graph():
     Without the cache this would open a fresh connection pool on every
     keystroke - the fastest way to exhaust a database's connection limit
     and the single most common Streamlit performance bug.
+
+    THE FLIP SIDE, WHICH WILL CONFUSE YOU AT LEAST ONCE: this cache
+    survives file edits. Streamlit re-runs the SCRIPT when you save, but
+    it returns the cached graph and does not re-import already-loaded
+    modules - so a change to graph/, agents/, or tools/ has no effect
+    until you STOP the server (Ctrl+C) and start it again. A browser
+    refresh or the "Rerun" button will not do it. The same property that
+    stops us reopening the pool also pins us to the code we booted with.
     """
     return build_graph(checkpointer=get_checkpointer())
 
@@ -72,6 +80,7 @@ def new_thread() -> None:
             pass
     st.session_state.thread_id = f"web-{uuid.uuid4().hex[:8]}"
     st.session_state.logged = 0
+    st.session_state.timed = 0
     st.session_state.pending = None
 
 
@@ -193,8 +202,10 @@ def run(payload) -> None:
             result,
             thread_id=st.session_state.thread_id,
             since=st.session_state.logged,
+            since_timings=st.session_state.timed,
         )
         st.session_state.logged = len(result.get("usage") or [])
+        st.session_state.timed = len(result.get("timings") or [])
 
 
 # A decision was recorded by a button click on the PREVIOUS rerun.

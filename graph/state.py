@@ -57,6 +57,18 @@ class UsageRecord(TypedDict):
     cost_usd: float
 
 
+class NodeTiming(TypedDict):
+    """How long one node took, in wall-clock seconds.
+
+    WALL CLOCK, not CPU time: the customer waits on wall clock. Nearly all
+    of it is network - waiting for Bedrock, waiting for Postgres - so CPU
+    time would read as near-zero on a turn that took nine seconds.
+    """
+
+    node: str
+    seconds: float
+
+
 class ShopSenseState(TypedDict, total=False):
     """The conversation, as data.
 
@@ -106,6 +118,13 @@ class ShopSenseState(TypedDict, total=False):
     # it as a lambda-free import below for readability.
     usage: Annotated[list[UsageRecord], lambda old, new: (old or []) + (new or [])]
 
+    # Wall-clock per node, appended the same way. Cost answers "can we
+    # afford this?"; latency answers "will anyone wait for it?" - and the
+    # two have DIFFERENT worst cases. The supervisor is cheap but sits on
+    # the critical path of every turn; a specialist is expensive but runs
+    # once. You cannot infer either from the other.
+    timings: Annotated[list[NodeTiming], lambda old, new: (old or []) + (new or [])]
+
     # --- guardrails (Phase 7) ------------------------------------------
     # Set by the input gate when it blocks or masks something, so the
     # output rail and the trace log can see WHY a turn went the way it did.
@@ -152,10 +171,22 @@ def usage_totals(state: ShopSenseState) -> tuple[int, int, int, float]:
     )
 
 
+def elapsed_seconds(state: ShopSenseState) -> float:
+    """Total node time this conversation.
+
+    A SUM, not a max: our graph runs nodes sequentially, so the customer
+    waits for all of them. If we ever run specialists in parallel this
+    becomes wrong, and the fix is to time the whole turn from outside
+    rather than adding up the parts.
+    """
+    return sum(t["seconds"] for t in (state.get("timings") or []))
+
+
 def format_cost_footer(state: ShopSenseState) -> str:
-    """The line the README promises: '6 LLM calls - 9,412 tokens - ~$0.02'."""
+    """The line the README promises, plus the number the customer feels."""
     calls, tin, tout, usd = usage_totals(state)
-    return f"{calls} LLM calls - {tin + tout:,} tokens - ~${usd:.4f}"
+    secs = elapsed_seconds(state)
+    return f"{calls} LLM calls - {tin + tout:,} tokens - ~${usd:.4f} - {secs:.1f}s"
 
 
 # ---------------------------------------------------------------------------

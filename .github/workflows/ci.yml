@@ -1,0 +1,202 @@
+# The pipeline: every push is tested, and only tested code is deployed.
+#
+# WHAT CI/CD IS (from zero)
+#   CI - Continuous Integration: every time you push code, a fresh machine
+#   somewhere checks out your repo and runs your tests. Not your laptop:
+#   a clean machine, from a git commit, with nothing left over from
+#   yesterday's experiments. That is what catches "works on my machine".
+#
+#   CD - Continuous Deployment: when those checks pass, the same pipeline
+#   ships the result. Nobody builds an image by hand, nobody remembers to
+#   run the tests first, and nobody can skip the step because they are in
+#   a hurry.
+#
+# THE SHAPE OF THIS FILE
+#   A workflow is a set of JOBS. Jobs run in parallel unless one `needs`
+#   another - and those `needs` lines are the gate. Because `deploy`
+#   needs `test`, a red test suite makes deployment IMPOSSIBLE, not
+#   merely inadvisable. That single word is the README's claim
+#   "if routing breaks, the deploy fails" expressed as machinery.
+#
+# WHY FOUR JOBS AND NOT ONE
+#   They have different requirements, and collapsing them would drag the
+#   cheapest check down to the slowest one's constraints:
+#     test         no secrets, ~1 min   - runs for everyone, even forks
+#     live-evals   needs secrets, ~5 min, costs money
+#     docker       no secrets, ~3 min   - proves the image still builds
+#     deploy       needs AWS, main only
+#   A fork or a first-time contributor still gets a meaningful signal from
+#   `test`, which is the check that must never be skippable.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Lets you re-run the pipeline by hand from the Actions tab - useful
+  # when a deploy failed for an environment reason rather than a code one.
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  # -------------------------------------------------------------------------
+  # 1. The gate that always runs. No credentials, no cost, ~seconds.
+  # -------------------------------------------------------------------------
+  test:
+    name: Fast evals (no credentials)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          # Caches the pip download directory between runs. Without it,
+          # every push re-downloads ~200MB of wheels.
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run credential-free evals
+        # Retrieval ranking, guardrail patterns, the citation auditor, the
+        # routing hop-cap, schema validation. 14 tests in under 3 seconds -
+        # and they pass on a machine with no API key and no database, which
+        # is exactly why they can gate every push.
+        run: pytest tests/ -m "not live" -v
+
+  # -------------------------------------------------------------------------
+  # 2. The evals that talk to Bedrock. Needs secrets; costs a few cents.
+  # -------------------------------------------------------------------------
+  live-evals:
+    name: Live evals (Bedrock + database)
+    runs-on: ubuntu-latest
+    needs: test          # don't spend money if the free checks already failed
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run live evals
+        # No `if:` guard is needed here, and that is by design:
+        # tests/conftest.py SKIPS live tests when credentials are absent
+        # instead of failing. So this job stays green on a fork with no
+        # secrets, and only actually costs money where secrets exist.
+        # Skip-don't-fail in the test harness is what makes this simple.
+        env:
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          SHOPSENSE_MODEL_AGENT: ${{ vars.SHOPSENSE_MODEL_AGENT }}
+          SHOPSENSE_MODEL_ROUTER: ${{ vars.SHOPSENSE_MODEL_ROUTER }}
+          SHOPSENSE_DB_URL_RO: ${{ secrets.SHOPSENSE_DB_URL_RO }}
+          SHOPSENSE_DB_URL_WRITER: ${{ secrets.SHOPSENSE_DB_URL_WRITER }}
+          SHOPSENSE_DB_URL_GRAPH: ${{ secrets.SHOPSENSE_DB_URL_GRAPH }}
+        run: pytest tests/ -m "live" -v
+
+  # -------------------------------------------------------------------------
+  # 3. Does the image still build? Answered without pushing it anywhere.
+  # -------------------------------------------------------------------------
+  docker:
+    name: Build container image
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        # `load: false, push: false` means BUILD ONLY - we are asking one
+        # question ("is the Dockerfile still valid?") and answering it
+        # without needing a registry, credentials, or an AWS account.
+        # This is the job that replaces having Docker on your laptop.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          # Reuses layers from previous runs so a code-only change does
+          # not re-run pip install - the same caching argument as the
+          # Dockerfile's COPY ordering, applied to CI.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # -------------------------------------------------------------------------
+  # 4. Ship it. Only from main, only when everything above passed.
+  # -------------------------------------------------------------------------
+  deploy:
+    name: Push to ECR and deploy
+    runs-on: ubuntu-latest
+    # THIS is the gate. All three must be green; `needs` is not advisory.
+    needs: [test, live-evals, docker]
+    # Two more conditions:
+    #   - only the main branch deploys (a PR must never reach production)
+    #   - only when you have switched deployment on by setting the repo
+    #     variable AWS_DEPLOY_ENABLED=true. Until then the whole pipeline
+    #     still runs and this job is skipped, so CI is useful from day one
+    #     with no AWS account at all.
+    if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ENABLED == 'true'
+
+    # Required for OIDC (see below). Without `id-token: write` the
+    # credential exchange silently has nothing to exchange.
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get AWS credentials via OIDC
+        # NO LONG-LIVED AWS KEYS IN GITHUB. Instead, GitHub proves this
+        # workflow's identity to AWS ("repo X, branch main"), AWS checks
+        # that against a trust policy, and hands back credentials valid
+        # for one hour. Nothing to leak, nothing to rotate, and access is
+        # scoped to this repository.
+        #
+        # It is the same principle as the database roles: the thing doing
+        # the job gets exactly the privileges it needs, for exactly as
+        # long as it needs them.
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # TWO TAGS, on purpose:
+          #   :<git-sha>  immutable - every deploy is traceable to a commit,
+          #               and rolling back means redeploying an old sha.
+          #   :latest     convenient - what App Runner watches.
+          # Tagging only :latest makes "which code is in production?"
+          # unanswerable, which is the question you ask during an incident.
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/shopsense:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/shopsense:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy to App Runner
+        # App Runner watches the :latest tag; this tells it to pull now
+        # rather than waiting. It performs a rolling replacement - the old
+        # container keeps serving until the new one passes /health.
+        run: |
+          aws apprunner start-deployment \
+            --service-arn "${{ secrets.APPRUNNER_SERVICE_ARN }}"
+
+      - name: Summary
+        run: |
+          echo "### Deployed :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "Commit \`${{ github.sha }}\` passed all evals and shipped." >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,58 @@
+# What must NOT go into the image.
+#
+# THIS FILE IS NOT OPTIONAL, and it is not a copy of .gitignore.
+# `docker build` reads .dockerignore; it has never heard of .gitignore. A
+# repo with a flawless .gitignore will still bake .env into an image via
+# `COPY . .` - and `docker history` shows it to anyone who pulls that
+# image. Two different tools, two different files, one shared mistake.
+#
+# The rule: start by excluding everything you cannot justify shipping.
+
+# ---------------------------------------------------------------------------
+# Secrets - the reason this file exists
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*.pem
+*.key
+
+# ---------------------------------------------------------------------------
+# Local environment - large, and WRONG for the image
+# ---------------------------------------------------------------------------
+# .venv holds Windows binaries; the image is Linux. Copying it in would
+# both bloat the image and shadow the correctly-installed packages.
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# ---------------------------------------------------------------------------
+# Operational data - contains real customer messages
+# ---------------------------------------------------------------------------
+runs/
+*.log
+
+# ---------------------------------------------------------------------------
+# Development-only. Excluded because every file in the image is a file
+# that must be patched when it has a CVE.
+# ---------------------------------------------------------------------------
+.git/
+.github/
+tests/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
+assets/
+
+# ---------------------------------------------------------------------------
+# Deliberately NOT ignored, though it may look like it should be:
+#
+#   docs/      the RAG corpus - the policy agent has nothing to cite
+#              without it. It is DATA, not documentation.
+#   db/*.sql   schema + grants, needed to re-seed a fresh database.
+# ---------------------------------------------------------------------------

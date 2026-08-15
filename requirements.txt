@@ -81,6 +81,21 @@ langgraph-checkpoint-postgres==3.1.1
 langsmith==0.10.15
 
 # ---------------------------------------------------------------------------
+# Phase 12 — the HTTP API (what actually gets deployed)
+# ---------------------------------------------------------------------------
+
+# The web framework. Chosen over Flask/Django for three things we use
+# directly: Pydantic request/response validation (we already model
+# everything with Pydantic), automatic /docs, and first-class async.
+fastapi==0.141.1
+
+# The ASGI server that actually runs FastAPI - the framework defines the
+# endpoints, the server accepts TCP connections and speaks HTTP.
+# [standard] adds the C-speed HTTP parser and websocket support; without
+# it uvicorn falls back to slower pure-Python implementations.
+uvicorn[standard]==0.52.3
+
+# ---------------------------------------------------------------------------
 # Phase 9 — user interface
 # ---------------------------------------------------------------------------
 

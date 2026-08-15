@@ -163,15 +163,78 @@ def supervisor_node(state: ShopSenseState) -> dict:
     }
 
 
+DIRECT_REPLY_PROMPT = """You are the customer-facing voice of an online \
+store's support assistant. The customer's last message does not need an \
+order lookup or a policy document - it is a greeting, a thank-you, a \
+goodbye, or a question about what you can help with.
+
+Reply in one or two warm, natural sentences. If they have not asked for \
+anything yet, briefly say what you can help with: orders and deliveries, \
+returns and refunds, and store policies. Never invent order details or \
+policy facts - you have no access to either."""
+
+
+def _has_fresh_answer(state: ShopSenseState) -> bool:
+    """Has anything already answered the customer's latest message?
+
+    Walk backwards: an assistant message before we reach the customer's
+    turn means an answer exists. Reaching the customer's turn first means
+    nobody has spoken since they did.
+    """
+    for m in reversed(state.get("messages") or []):
+        if isinstance(m, AIMessage) and not m.tool_calls:
+            return True
+        if isinstance(m, HumanMessage):
+            return False
+    return False
+
+
+def direct_reply_node(state: ShopSenseState) -> dict:
+    """The supervisor answering in its own voice, for conversational glue.
+
+    WHY THIS NODE EXISTS (found by typing "hi" into the UI, which produced
+    an empty reply): FINISH was overloaded. It meant BOTH "a specialist has
+    already answered" AND "no specialist is needed" - and for a greeting
+    the second is true while the first is not, so nobody replied at all.
+
+    The lesson generalises past this bug: a routing enum needs a branch for
+    every reachable state, not just the interesting ones. "Neither
+    specialist applies" is a state, and states without an owner produce
+    silence - the one failure mode a user notices instantly and a
+    developer never sees, because developers test the interesting paths.
+    """
+    settings = get_settings()
+    reply = get_llm("router").invoke(
+        [SystemMessage(content=DIRECT_REPLY_PROMPT), *(state.get("messages") or [])]
+    )
+    u = usage_from(reply, settings.model_router)
+    return {
+        "messages": [reply],
+        "usage": [{
+            "node": "direct_reply",
+            "model": settings.model_router,
+            "input_tokens": u.total_input,
+            "output_tokens": u.output,
+            "cost_usd": u.cost,
+        }],
+    }
+
+
 def route_from_state(state: ShopSenseState) -> str:
     """The conditional edge's condition function.
 
     LangGraph calls this AFTER supervisor_node and uses the returned string
-    to pick the next node. It is deliberately dumb - all the thinking
-    already happened; this just reads the signpost. Defaulting to FINISH
-    means a missing/garbled route ends the turn instead of hanging.
+    to pick the next node. Mostly it just reads the signpost - all the
+    thinking already happened. The one piece of logic it adds is splitting
+    FINISH into its two real meanings (see direct_reply_node).
+
+    Defaulting to FINISH means a missing or garbled route ends the turn
+    instead of hanging.
     """
-    return state.get("route") or "FINISH"
+    route = state.get("route") or "FINISH"
+    if route == "FINISH" and not _has_fresh_answer(state):
+        return "direct_reply"
+    return route
 
 
 # ---------------------------------------------------------------------------

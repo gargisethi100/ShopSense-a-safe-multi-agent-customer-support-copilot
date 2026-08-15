@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import sys
+from functools import lru_cache
 from typing import Literal, NamedTuple
 
 import boto3
@@ -41,6 +42,7 @@ from config import cost_usd, get_settings
 Role = Literal["agent", "router"]
 
 
+@lru_cache(maxsize=8)
 def get_llm(
     role: Role = "agent",
     *,
@@ -55,6 +57,25 @@ def get_llm(
     `temperature` is honoured only if the resolved model supports it; on a
     model that would reject it we raise HERE, at construction, with an
     explanation - not five tool calls deep inside a graph run.
+
+    WHY @lru_cache - AND HOW WE FOUND OUT WE NEEDED IT
+    Constructing ChatBedrockConverse builds a boto3 client, and boto3
+    client construction is SLOW: it loads botocore's service-model JSON
+    and resolves endpoints. Measured on this project: 5.2 SECONDS, every
+    call. At ~11 calls per conversation that was ~55s of latency spent
+    before a single token was generated - more than a third of the total.
+
+    Nobody noticed for eight phases because the cost log looked fine:
+    client construction bills nothing. It only surfaced once we measured
+    LATENCY separately, which is the argument for measuring both.
+
+    Caching is safe because these clients are effectively immutable for
+    our purposes: .bind_tools() and .with_structured_output() return NEW
+    objects rather than mutating the one they are called on, so two nodes
+    sharing an instance cannot interfere with each other.
+
+    maxsize=8 because the key space is tiny and fixed: two roles times the
+    handful of (temperature, max_tokens) combinations the nodes use.
     """
     settings = get_settings()
     settings.require_aws_credentials()  # a sentence, not a NoCredentialsError
