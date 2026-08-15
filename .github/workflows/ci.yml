@@ -156,6 +156,14 @@ jobs:
       id-token: write
       contents: read
 
+    # Lifted to job level because the `secrets` context is NOT available in
+    # a step's `if:` - only github, needs, env, vars, job, runner, steps and
+    # inputs are. Copying the secret into `env` here makes it visible to the
+    # step conditions below. (The IDE's workflow linter catches this; GitHub
+    # would too, at run time, with a less helpful message.)
+    env:
+      APPRUNNER_SERVICE_ARN: ${{ secrets.APPRUNNER_SERVICE_ARN }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -199,12 +207,23 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Deploy to App Runner
+        # SKIPPED UNTIL THE SERVICE EXISTS - and that ordering is forced:
+        # App Runner is created FROM an image, so the image must reach ECR
+        # before there is any service to deploy to. The first successful
+        # run of this job therefore pushes an image and stops here; you
+        # create the service from that image, add its ARN as a secret, and
+        # every later push deploys end to end.
+        #
+        # Guarding on the secret rather than commenting the step out means
+        # the pipeline is complete from day one and switches itself on the
+        # moment the missing piece appears.
+        if: env.APPRUNNER_SERVICE_ARN != ''
         # App Runner watches the :latest tag; this tells it to pull now
         # rather than waiting. It performs a rolling replacement - the old
         # container keeps serving until the new one passes /health.
         run: |
           aws apprunner start-deployment \
-            --service-arn "${{ secrets.APPRUNNER_SERVICE_ARN }}"
+            --service-arn "$APPRUNNER_SERVICE_ARN"
 
       - name: Summary
         run: |
