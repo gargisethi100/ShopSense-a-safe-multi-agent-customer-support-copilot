@@ -170,41 +170,15 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Check the role ARN we are about to send (temporary debug)
-        # Secrets are masked in logs, so we cannot print the value - but the
-        # LENGTH is safe and is exactly what we need. A trailing newline or
-        # space picked up while copy-pasting is invisible in the GitHub UI
-        # and makes the ARN resolve to nothing, which AWS reports with the
-        # same "Not authorized" message it uses for a real permission
-        # problem. Length 54 = clean; anything else = stray characters.
-        env:
-          ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          echo "ARN length : ${#ARN}   (expected: 54)"
-          case "$ARN" in
-            arn:aws:iam::295028317927:role/shopsense-github-deploy) echo "ARN value  : correct" ;;
-            *:oidc-provider/*) echo "ARN value  : WRONG - this is the OIDC PROVIDER arn, not the ROLE arn" ;;
-            "") echo "ARN value  : EMPTY - secret not set" ;;
-            *) echo "ARN value  : WRONG - unexpected value" ;;
-          esac
-          echo "region len : ${#REGION}   (expected: 9 for us-east-1)"
-          [ -n "$REGION" ] || echo "region     : EMPTY - AWS_REGION secret not set" 
-
-      - name: Decode the OIDC token GitHub will send (temporary debug)
-        # THE DEFINITIVE CHECK. Everything else we verified is what we BELIEVE
-        # is sent; this prints what actually IS. sub/aud/iss are identity
-        # claims, not secrets - they are exactly what AWS matches the trust
-        # policy against. If `sub` does not match the StringLike pattern in
-        # the trust policy, that is the bug.
-        #
-        # Written as two single lines on purpose: a multi-line `python3 -c`
-        # inside a YAML block scalar must stay indented, and unindented
-        # continuation lines silently terminate the block - which is exactly
-        # how the previous version broke the whole workflow file.
-        run: |
-          curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" -o /tmp/tok.json
-          python3 -c "import json,base64;t=json.load(open('/tmp/tok.json'))['value'];p=t.split('.')[1];p+='='*(-len(p)%4);c=json.loads(base64.urlsafe_b64decode(p));[print(k.ljust(17),':',c.get(k)) for k in ['iss','aud','sub','repository','repository_owner','ref']]"
+      # NOTE: two temporary debug steps lived here while diagnosing an OIDC
+      # failure. They printed the role-ARN length and decoded the OIDC
+      # token's claims - which is how we found that GitHub now sends
+      #   repo:OWNER@<owner-id>/REPO@<repo-id>:ref:...
+      # rather than the documented `repo:OWNER/REPO:ref:...`. The role's
+      # trust policy matches both forms; pinning to the numeric IDs is the
+      # stronger option because IDs survive a rename and names do not.
+      # Removed once green - debug scaffolding that outlives its bug becomes
+      # noise nobody dares delete.
 
       - name: Get AWS credentials via OIDC
         # NO LONG-LIVED AWS KEYS IN GITHUB. Instead, GitHub proves this
