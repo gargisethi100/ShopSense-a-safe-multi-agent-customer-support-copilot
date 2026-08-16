@@ -170,6 +170,22 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Check the role ARN we are about to send (temporary debug)
+        # Secrets are masked in logs, so we cannot print the value - but the
+        # LENGTH is safe and is exactly what we need. A trailing newline or
+        # space picked up while copy-pasting is invisible in the GitHub UI
+        # and makes the ARN resolve to nothing, which AWS reports with the
+        # same "Not authorized" message it uses for a real permission
+        # problem. Length 54 = clean; anything else = stray characters.
+        env:
+          ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          echo "ARN length: ${#ARN}   (expected: 54)"
+          case "$ARN" in
+            arn:aws:iam::295028317927:role/shopsense-github-deploy) echo "exact match: YES" ;;
+            *) echo "exact match: NO - value differs from expected" ;;
+          esac
+
       - name: Get AWS credentials via OIDC
         # NO LONG-LIVED AWS KEYS IN GITHUB. Instead, GitHub proves this
         # workflow's identity to AWS ("repo X, branch main"), AWS checks
