@@ -179,12 +179,17 @@ jobs:
         # problem. Length 54 = clean; anything else = stray characters.
         env:
           ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          REGION: ${{ secrets.AWS_REGION }}
         run: |
-          echo "ARN length: ${#ARN}   (expected: 54)"
+          echo "ARN length : ${#ARN}   (expected: 54)"
           case "$ARN" in
-            arn:aws:iam::295028317927:role/shopsense-github-deploy) echo "exact match: YES" ;;
-            *) echo "exact match: NO - value differs from expected" ;;
+            arn:aws:iam::295028317927:role/shopsense-github-deploy) echo "ARN value  : correct" ;;
+            *:oidc-provider/*) echo "ARN value  : WRONG - this is the OIDC PROVIDER arn, not the ROLE arn" ;;
+            "") echo "ARN value  : EMPTY - secret not set" ;;
+            *) echo "ARN value  : WRONG - unexpected value" ;;
           esac
+          echo "region len : ${#REGION}   (expected: 9 for us-east-1)"
+          [ -n "$REGION" ] || echo "region     : EMPTY - AWS_REGION secret not set" 
 
       - name: Get AWS credentials via OIDC
         # NO LONG-LIVED AWS KEYS IN GITHUB. Instead, GitHub proves this
