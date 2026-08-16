@@ -162,7 +162,8 @@ jobs:
     # step conditions below. (The IDE's workflow linter catches this; GitHub
     # would too, at run time, with a less helpful message.)
     env:
-      APPRUNNER_SERVICE_ARN: ${{ secrets.APPRUNNER_SERVICE_ARN }}
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+      ECS_SERVICE: ${{ vars.ECS_SERVICE }}
 
     steps:
       - uses: actions/checkout@v4
@@ -216,24 +217,26 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Deploy to App Runner
-        # SKIPPED UNTIL THE SERVICE EXISTS - and that ordering is forced:
-        # App Runner is created FROM an image, so the image must reach ECR
-        # before there is any service to deploy to. The first successful
-        # run of this job therefore pushes an image and stops here; you
-        # create the service from that image, add its ARN as a secret, and
-        # every later push deploys end to end.
+      - name: Deploy to ECS
+        # WHY THIS IS ONE COMMAND AND NOT A DEPLOYMENT SCRIPT
+        # The task definition already points at `shopsense:latest`, and the
+        # build step above just overwrote that tag with the new image. So
+        # ECS does not need to be told WHAT to run - only to go and fetch
+        # it again. `--force-new-deployment` does exactly that.
         #
-        # Guarding on the secret rather than commenting the step out means
-        # the pipeline is complete from day one and switches itself on the
-        # moment the missing piece appears.
-        if: env.APPRUNNER_SERVICE_ARN != ''
-        # App Runner watches the :latest tag; this tells it to pull now
-        # rather than waiting. It performs a rolling replacement - the old
-        # container keeps serving until the new one passes /health.
+        # It is a ROLLING replacement: ECS starts a new task, waits for it
+        # to pass the /health check, shifts traffic, then stops the old
+        # one. A deploy that fails its health check never receives traffic,
+        # so a broken build degrades to "no deploy" rather than "outage".
+        #
+        # Skipped until the cluster/service variables are set, for the same
+        # reason the old App Runner step was: the pipeline should be
+        # complete before the infrastructure exists, and switch itself on
+        # when it does.
+        if: env.ECS_SERVICE != ''
         run: |
-          aws apprunner start-deployment \
-            --service-arn "$APPRUNNER_SERVICE_ARN"
+          aws ecs update-service             --cluster "$ECS_CLUSTER"             --service "$ECS_SERVICE"             --force-new-deployment             --no-cli-pager > /dev/null
+          echo "Triggered rolling deployment of $ECS_SERVICE"
 
       - name: Summary
         run: |
