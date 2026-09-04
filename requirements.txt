@@ -99,8 +99,9 @@ uvicorn[standard]==0.52.3
 # Phase 9 — user interface
 # ---------------------------------------------------------------------------
 
-# Chat UI + the refund approval panel + the cost footer.
-streamlit==1.60.0
+# No package needed. The UI is hand-written HTML/CSS/JS in frontend/,
+# served by the API process itself (see the StaticFiles mount at the
+# bottom of api/main.py). A build step is a dependency too.
 
 # ---------------------------------------------------------------------------
 # Phase 10 — the eval suite that gates the deploy

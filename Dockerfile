@@ -103,7 +103,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 # load balancer, so request URLs and client IPs are the real ones rather
 # than the proxy's.
 #
-# (The Streamlit UI is still in this image and still runnable - just
-#  override the command:  docker run ... shopsense streamlit run app.py)
+# The browser UI ships in this image too, and needs no second process:
+# api/main.py mounts frontend/ as static files, so this one command
+# serves the page and the API it calls from the same origin.
 # ---------------------------------------------------------------------------
 CMD ["sh", "-c", "exec uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers"]

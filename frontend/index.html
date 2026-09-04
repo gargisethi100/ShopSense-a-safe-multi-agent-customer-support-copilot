@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ShopSense — orders and returns</title>
+<meta name="description" content="Ask about an order, or about how returns, shipping and warranties work at ShopSense.">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..700&family=Literata:ital,opsz,wght@0,7..72,400..600;1,7..72,400&display=swap">
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<header class="masthead">
+  <a class="mark" href="./">ShopSense</a>
+  <p class="scope">Orders and returns</p>
+</header>
+
+<main class="page" id="page">
+  <div class="column">
+
+    <!-- The opening. A support chat's first screen is empty, so this is
+         the hero: it says what can be asked, in the words a customer
+         would use. Removed by app.js on the first message. -->
+    <section class="opening" id="opening">
+      <h1 class="opening-head">Something to sort out?</h1>
+      <p class="opening-sub">Ask about an order, or about how returns, shipping and warranties work. Refunds are checked by a person before anything moves.</p>
+      <ul class="openers">
+        <li><button type="button" class="opener" data-say="Where is my order ord_1003?">Where is my order ord_1003?</button></li>
+        <li><button type="button" class="opener" data-say="My headphones arrived broken. Can I get a refund?">My headphones arrived broken. Can I get a refund?</button></li>
+        <li><button type="button" class="opener" data-say="How long is the warranty?">How long is the warranty?</button></li>
+      </ul>
+    </section>
+
+    <!-- aria-live so a screen reader hears replies as they land. -->
+    <ol class="transcript" id="transcript" aria-live="polite" aria-label="Conversation"></ol>
+
+    <p class="working" id="working" hidden><span class="working-dot" aria-hidden="true"></span>Looking that up</p>
+
+    <!-- The hold. The one loud moment on the page. -->
+    <section class="hold" id="hold" role="status" hidden>
+      <p class="hold-state"><span class="hold-dot" aria-hidden="true"></span>On hold</p>
+      <p class="hold-amount" id="hold-amount"></p>
+      <p class="hold-item" id="hold-item"></p>
+      <p class="hold-order" id="hold-order"></p>
+      <p class="hold-body">Someone on the team is reviewing this refund. Nothing has been charged or refunded yet, and this page updates the moment they decide.</p>
+      <p class="hold-ref" id="hold-ref"></p>
+    </section>
+
+    <p class="notice" id="notice" hidden></p>
+
+  </div>
+</main>
+
+<form class="composer" id="composer" autocomplete="off">
+  <div class="composer-inner">
+    <label class="visually-hidden" for="entry">Your message</label>
+    <textarea id="entry" name="entry" rows="1" maxlength="2000"
+              placeholder="Ask about an order or a policy"
+              enterkeyhint="send"></textarea>
+    <button type="submit" class="send" id="send">Send</button>
+  </div>
+</form>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Refund review — ShopSense</title>
+<meta name="robots" content="noindex">
+<style>
+/* Deliberately undesigned. This is the staff door, not the shopfront:
+   it exists because retiring the Streamlit page removed the only
+   clickable Approve in the project, and the refund gate is the whole
+   point of the system. System fonts, no palette, no ornament. */
+* { box-sizing: border-box; }
+body {
+  margin: 0 auto; max-width: 44rem; padding: 2rem 1.25rem 4rem;
+  font: 15px/1.55 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color: #16241F; background: #fff;
+}
+h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
+.lede { margin: 0 0 2rem; color: #55635C; }
+fieldset { border: 1px solid #CFD8D2; margin: 0 0 1.5rem; padding: 1rem 1.25rem 1.25rem; }
+legend { padding: 0 0.4rem; color: #55635C; font-size: 0.8125rem; }
+label { display: block; margin: 0.85rem 0 0.25rem; font-size: 0.8125rem; color: #55635C; }
+input, textarea, button { font: inherit; }
+input, textarea {
+  width: 100%; padding: 0.5rem 0.6rem; border: 1px solid #CFD8D2; background: #fff; color: inherit;
+}
+textarea { resize: vertical; min-height: 3.5rem; }
+button { padding: 0.55rem 1.1rem; border: 1px solid #16241F; background: #16241F; color: #fff; cursor: pointer; }
+button.secondary { background: #fff; color: #16241F; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+.row { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 1.25rem; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 1.25rem; margin: 0; }
+dt { color: #55635C; font-size: 0.8125rem; }
+dd { margin: 0; }
+.amount { font-size: 1.5rem; font-weight: 600; }
+.msg { margin: 1.25rem 0 0; padding: 0.7rem 0.9rem; border-left: 3px solid #E0A83C; background: #F3F5F3; }
+.transcript { margin: 1.25rem 0 0; padding: 0; list-style: none; border-top: 1px solid #CFD8D2; }
+.transcript li { padding: 0.6rem 0; border-bottom: 1px solid #CFD8D2; }
+.who { display: block; font-size: 0.75rem; color: #55635C; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<h1>Refund review</h1>
+<p class="lede">Approving writes a row to the refunds table under your name. That table is append-only — there is no undo.</p>
+
+<fieldset>
+  <legend>Conversation</legend>
+  <label for="thread">Thread id</label>
+  <input id="thread" placeholder="web-a1f3c2d4" autocomplete="off">
+  <div class="row"><button id="load" type="button">Load</button></div>
+</fieldset>
+
+<div id="found" hidden>
+  <fieldset>
+    <legend>Requested refund</legend>
+    <dl>
+      <dt>Amount</dt><dd class="amount" id="amount"></dd>
+      <dt>Item</dt><dd id="item"></dd>
+      <dt>Order</dt><dd id="order"></dd>
+      <dt>Customer</dt><dd id="customer"></dd>
+      <dt>Reason</dt><dd id="reason"></dd>
+      <dt>Reference</dt><dd id="ref"></dd>
+    </dl>
+    <ol class="transcript" id="transcript"></ol>
+  </fieldset>
+
+  <fieldset>
+    <legend>Your decision</legend>
+    <label for="by">Your name</label>
+    <input id="by" placeholder="Who is deciding" autocomplete="off">
+    <label for="note">Note (optional, and required in practice when declining)</label>
+    <textarea id="note" maxlength="500"></textarea>
+    <div class="row">
+      <button id="approve" type="button">Approve refund</button>
+      <button id="reject" type="button" class="secondary">Decline refund</button>
+    </div>
+  </fieldset>
+</div>
+
+<p class="msg" id="msg" hidden></p>
+
+<script type="module">
+/* There is no authentication anywhere in this project, so "your name" is
+   typed rather than taken from a session. That is a real gap, and a text
+   box makes it visible; the Streamlit page it replaces hardcoded
+   "web-operator", which hid it. The refunds table demands a name because
+   someone has to be accountable for the money. */
+
+const $ = (id) => document.getElementById(id);
+const say = (text) => { $('msg').textContent = text; $('msg').hidden = !text; };
+
+// Deep-linkable: /review.html?thread=web-a1f3c2d4
+const fromUrl = new URLSearchParams(location.search).get('thread');
+if (fromUrl) $('thread').value = fromUrl;
+
+async function api(path, options) {
+  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.detail || `${res.status} ${res.statusText}`);
+  return body;
+}
+
+async function load() {
+  const thread = $('thread').value.trim();
+  if (!thread) return say('Enter a thread id first.');
+  say('');
+  $('found').hidden = true;
+
+  try {
+    const state = await api(`/conversations/${encodeURIComponent(thread)}/state`);
+    if (!state.exists) return say(`No conversation with thread id ${thread}.`);
+    if (!state.held) return say('This conversation is not waiting on a decision.');
+
+    const r = state.pending_approval;
+    $('amount').textContent = `$${r.amount_usd}`;
+    $('item').textContent = r.product_name;
+    $('order').textContent = r.order_id;
+    $('customer').textContent = `${r.customer_name} (${r.customer_id})`;
+    $('reason').textContent = r.reason;
+    $('ref').textContent = r.refund_id;
+
+    const messages = await api(`/conversations/${encodeURIComponent(thread)}`);
+    $('transcript').replaceChildren(...messages.map((m) => {
+      const li = document.createElement('li');
+      const who = document.createElement('span');
+      who.className = 'who';
+      who.textContent = m.role === 'customer' ? 'Customer' : 'ShopSense';
+      li.append(who, document.createTextNode(m.text));
+      return li;
+    }));
+
+    $('found').hidden = false;
+  } catch (err) {
+    say(err.message);
+  }
+}
+
+async function decide(approved) {
+  const thread = $('thread').value.trim();
+  const by = $('by').value.trim();
+  if (!by) return say('Put your name on this decision before sending it.');
+
+  $('approve').disabled = $('reject').disabled = true;
+  try {
+    await api('/approve', {
+      method: 'POST',
+      body: JSON.stringify({ thread_id: thread, approved, approved_by: by, note: $('note').value }),
+    });
+    $('found').hidden = true;
+    say(approved
+      ? `Refund approved and written under ${by}. The customer's page has been told.`
+      : `Refund declined under ${by}. No money moved.`);
+  } catch (err) {
+    say(err.message);
+  } finally {
+    $('approve').disabled = $('reject').disabled = false;
+  }
+}
+
+$('load').addEventListener('click', load);
+$('thread').addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
+$('approve').addEventListener('click', () => decide(true));
+$('reject').addEventListener('click', () => decide(false));
+
+if (fromUrl) load();
+</script>
+</body>
+</html>

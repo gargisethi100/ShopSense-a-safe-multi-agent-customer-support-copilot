@@ -1,0 +1,460 @@
+/* ShopSense — shopper-facing support chat.
+ *
+ * THE ONE IDEA: speaker is signalled by TYPEFACE, not by bubble. The
+ * customer writes in the grotesque; the shop answers in the serif. That
+ * removes every bubble, shadow and rounded card from the transcript, and
+ * leaves exactly one card on the page — the refund hold, which is the one
+ * thing here no other support chat does.
+ *
+ * Palette is cool mineral, drawn from the shop's own catalogue (Aurora,
+ * Alpine, Cloud) rather than the warm-cream-and-terracotta everything else
+ * arrives in.
+ *
+ * SPECIFICITY: every rule below is a single class. No element+class
+ * combinations, so nothing silently out-ranks anything else on spacing.
+ */
+
+:root {
+  --ground:     #E9EDEA;  /* page wash: pale, faintly green */
+  --surface:    #F7F9F7;  /* the conversation column */
+  --ink:        #16241F;  /* a real green-black, not a tinted grey */
+  --ink-soft:   #55635C;  /* the customer's own lines, footnotes */
+  --ink-hair:   #CFD8D2;  /* the only rule on the page */
+  --pine:       #2E5A4B;  /* citations, focus, the working dot */
+  --marigold:   #E0A83C;  /* one use only: the held mark */
+  --on-ink:     #E9EDEA;  /* type on the inverted hold panel */
+  --on-ink-soft:#9DAFA6;
+
+  --sans: 'Bricolage Grotesque', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --serif: Literata, Georgia, 'Times New Roman', serif;
+
+  /* 13 / 15 / 17 / 21 / 27 / 54 */
+  --t-xs: 0.8125rem;
+  --t-s:  0.9375rem;
+  --t-m:  1.0625rem;
+  --t-l:  1.3125rem;
+  --t-xl: 1.6875rem;
+  --t-xxl: 3.375rem;
+
+  --measure: 62ch;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+/* Any class below that sets `display` would otherwise out-rank the hidden
+ * attribute, and the element stays on screen with app.js convinced it is
+ * gone. That is exactly what happened to the "Looking that up" line. */
+[hidden] { display: none !important; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: var(--t-m);
+  line-height: 1.65;
+  font-optical-sizing: auto;
+}
+
+:focus-visible {
+  outline: 2px solid var(--pine);
+  outline-offset: 3px;
+  border-radius: 1px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------
+ * Masthead — deliberately quiet. It names the shop and the counter you
+ * have walked up to, and then gets out of the way.
+ * ------------------------------------------------------------------ */
+
+.masthead {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 0.9rem;
+  padding: 1.1rem clamp(1rem, 5vw, 2.5rem);
+  border-bottom: 1px solid var(--ink-hair);
+  background: var(--ground);
+}
+
+.mark {
+  font-family: var(--sans);
+  font-size: var(--t-l);
+  font-weight: 600;
+  font-stretch: 92%;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.scope {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: var(--t-xs);
+  color: var(--ink-soft);
+}
+
+/* --------------------------------------------------------------------
+ * The column
+ * ------------------------------------------------------------------ */
+
+.page {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  background: var(--surface);
+  border-bottom: 1px solid var(--ink-hair);
+}
+
+.column {
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: clamp(1.5rem, 5vw, 3rem) clamp(1rem, 5vw, 2.5rem) 2rem;
+}
+
+/* --------------------------------------------------------------------
+ * The opening
+ * ------------------------------------------------------------------ */
+
+.opening { padding-top: clamp(0.5rem, 7vh, 4rem); }
+
+.opening-head {
+  margin: 0 0 0.5rem;
+  font-family: var(--serif);
+  font-size: var(--t-xl);
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  max-width: 24ch;
+  text-wrap: balance;
+}
+
+.opening-sub {
+  margin: 0 0 2.25rem;
+  max-width: 46ch;
+  color: var(--ink-soft);
+  font-size: var(--t-m);
+}
+
+.openers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--ink-hair);
+}
+
+.opener {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0.85rem 0;
+  border: 0;
+  border-bottom: 1px solid var(--ink-hair);
+  background: none;
+  font-family: var(--sans);
+  font-size: var(--t-s);
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.opener:hover { color: var(--pine); }
+
+/* --------------------------------------------------------------------
+ * Transcript. No bubbles: the customer is set in the grotesque and
+ * pushed right, the shop answers in the serif across the full measure.
+ * ------------------------------------------------------------------ */
+
+.transcript {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.turn { margin: 0 0 1.9rem; }
+
+.turn-customer {
+  margin-left: auto;
+  max-width: 34ch;
+  font-family: var(--sans);
+  font-size: var(--t-s);
+  line-height: 1.5;
+  color: var(--ink-soft);
+  text-align: right;
+}
+
+.turn-assistant {
+  max-width: var(--measure);
+  font-family: var(--serif);
+  font-size: var(--t-m);
+  line-height: 1.65;
+  color: var(--ink);
+}
+
+.para { margin: 0 0 0.75rem; }
+.para-last { margin: 0; }
+
+/* The agents answer in light Markdown, so bold and bullets are real
+ * content here, not styling: "Status: Delivered" is the thing the
+ * customer opened the chat to read. */
+
+.turn-assistant strong { font-weight: 600; }
+
+.bullets {
+  /* Explicit: this list is nested inside the transcript's <ol>, and the
+   * browser's default second-level marker is a hollow circle. */
+  list-style: disc;
+  margin: 0 0 0.75rem;
+  padding-left: 1.15rem;
+}
+
+.bullets-last { margin-bottom: 0; }
+
+.bullets li { padding-left: 0.2rem; }
+.bullets li::marker { color: var(--pine); }
+
+/* Citations: real footnotes. A bare "[RET-1]" means nothing to a
+ * customer; a numbered mark tied to a named rule tells them which
+ * policy the answer is standing on. */
+
+.cite {
+  font-family: var(--sans);
+  font-size: 0.7em;
+  font-weight: 600;
+  vertical-align: 0.45em;
+  color: var(--pine);
+  padding-left: 0.12em;
+}
+
+.notes {
+  list-style: none;
+  margin: 1.2rem 0 0;
+  padding: 0;
+  max-width: var(--measure);
+}
+
+.note {
+  font-family: var(--sans);
+  font-size: var(--t-xs);
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+.note-num {
+  color: var(--pine);
+  font-weight: 600;
+  padding-right: 0.4em;
+}
+
+/* --------------------------------------------------------------------
+ * Working. Motion that answers what the person just did, so it earns
+ * its place: one dot, and it stops when the reply lands.
+ * ------------------------------------------------------------------ */
+
+.working {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 1.9rem;
+  font-family: var(--serif);
+  font-style: italic;
+  color: var(--ink-soft);
+}
+
+.working-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--pine);
+  animation: pulse 1.3s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.25; }
+  50%      { opacity: 1; }
+}
+
+/* --------------------------------------------------------------------
+ * The hold — the one card, and the one loud thing.
+ *
+ * The column has been pale for the whole conversation. When a refund
+ * stops for a person, it inverts. That flip is the entire motion budget
+ * for this page.
+ * ------------------------------------------------------------------ */
+
+.hold {
+  margin: 0 0 1.9rem;
+  padding: 1.6rem clamp(1.25rem, 4vw, 2rem) 1.75rem;
+  background: var(--ink);
+  color: var(--on-ink);
+  animation: unfold 420ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+@keyframes unfold {
+  from { opacity: 0; transform: translateY(-6px) scaleY(0.97); transform-origin: top; }
+  to   { opacity: 1; transform: none; }
+}
+
+.hold-state {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0 0 1.1rem;
+  font-family: var(--sans);
+  font-size: var(--t-xs);
+  color: var(--on-ink-soft);
+}
+
+.hold-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--marigold);
+}
+
+.hold-amount {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: var(--t-xxl);
+  font-weight: 600;
+  font-stretch: 88%;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: var(--on-ink);
+}
+
+.hold-item {
+  margin: 0.7rem 0 0;
+  font-family: var(--sans);
+  font-size: var(--t-m);
+  color: var(--on-ink);
+}
+
+.hold-order {
+  margin: 0.15rem 0 1.3rem;
+  font-family: var(--sans);
+  font-size: var(--t-s);
+  color: var(--on-ink-soft);
+}
+
+.hold-body {
+  margin: 0;
+  max-width: 48ch;
+  font-family: var(--serif);
+  font-size: var(--t-s);
+  line-height: 1.6;
+  color: var(--on-ink-soft);
+}
+
+.hold-ref {
+  margin: 1.1rem 0 0;
+  font-family: var(--sans);
+  font-size: var(--t-xs);
+  color: var(--on-ink-soft);
+}
+
+/* --------------------------------------------------------------------
+ * Notices. Something went wrong, or nothing is here yet: say what
+ * happened and what to do, in the shop's voice, without apologising.
+ * ------------------------------------------------------------------ */
+
+.notice {
+  margin: 0 0 1.9rem;
+  padding: 0.85rem 1.1rem;
+  max-width: var(--measure);
+  border-left: 3px solid var(--marigold);
+  background: var(--ground);
+  font-family: var(--sans);
+  font-size: var(--t-s);
+  line-height: 1.55;
+  color: var(--ink);
+}
+
+/* --------------------------------------------------------------------
+ * Composer
+ * ------------------------------------------------------------------ */
+
+.composer {
+  flex: none;
+  padding: 0.9rem clamp(1rem, 5vw, 2.5rem) 1.2rem;
+  background: var(--ground);
+}
+
+.composer-inner {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.75rem;
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 0.55rem 0.55rem 0.55rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--ink-hair);
+}
+
+.composer-inner:focus-within { border-color: var(--pine); }
+
+#entry {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 9rem;
+  padding: 0.45rem 0;
+  border: 0;
+  background: none;
+  resize: none;
+  font-family: var(--sans);
+  font-size: var(--t-s);
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+#entry:focus { outline: none; }
+#entry::placeholder { color: var(--ink-soft); }
+#entry:disabled { color: var(--ink-soft); cursor: not-allowed; }
+
+.send {
+  flex: none;
+  padding: 0.55rem 1.15rem;
+  border: 0;
+  background: var(--ink);
+  color: var(--on-ink);
+  font-family: var(--sans);
+  font-size: var(--t-s);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.send:hover { background: var(--pine); }
+
+.send:disabled {
+  background: var(--ink-hair);
+  color: var(--ink-soft);
+  cursor: not-allowed;
+}
+
+/* --------------------------------------------------------------------
+ * Small screens: the measure is already narrow, so only the loudest
+ * element needs to come down.
+ * ------------------------------------------------------------------ */
+
+@media (max-width: 30rem) {
+  :root { --t-xxl: 2.5rem; }
+  .masthead { flex-direction: column; align-items: flex-start; gap: 0.1rem; }
+  .turn-customer { max-width: 26ch; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hold { animation: none; }
+  .working-dot { animation: none; opacity: 0.7; }
+  *, *::before, *::after { transition: none !important; }
+}

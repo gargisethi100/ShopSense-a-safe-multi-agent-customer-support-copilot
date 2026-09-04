@@ -1,10 +1,10 @@
 """The HTTP API: ShopSense as a service other programs can call.
 
 WHY WRAP THE GRAPH IN AN API AT ALL
-    Right now the only ways to talk to ShopSense are a Python CLI and a
-    Streamlit page - both of which have to BE the application: they import
-    the graph, open the database pools, and hold everything in one
-    process. That is fine for a demo and wrong for a product:
+    Without this file the only way to talk to ShopSense is a Python CLI
+    that has to BE the application: it imports the graph, opens the
+    database pools, and holds everything in one process. That is fine
+    for a demo and wrong for a product:
 
       * a mobile app, a website widget, or a Slack bot cannot `import
         graph.build` - they can only make HTTP requests
@@ -46,9 +46,11 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 from pydantic import BaseModel, Field
@@ -57,9 +59,17 @@ from graph.build import build_graph, get_checkpointer
 from graph.memory import save_profile
 from graph.state import elapsed_seconds, usage_totals
 from obs.costlog import load_runs, record_run, trace_config, tracing_status
+from rag.retriever import load_chunks
 
-# Module-level handle, filled once at startup by the lifespan below.
+# Module-level handles, filled once at startup by the lifespan below.
 GRAPH: Any = None
+POLICY_INDEX: list[dict] = []
+
+# The browser UI lives next to this package, not inside it. Resolved from
+# __file__ rather than the working directory: uvicorn is started from the
+# repo root locally and from /app in the container, and a relative path
+# would silently serve nothing in one of them.
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 
 @asynccontextmanager
@@ -76,8 +86,15 @@ async def lifespan(app: FastAPI):
     shutdown. This is FastAPI's replacement for the older @app.on_event
     decorators.
     """
-    global GRAPH
+    global GRAPH, POLICY_INDEX
     GRAPH = build_graph(checkpointer=get_checkpointer())
+    # The citation index: section_id -> title + file. Built once because the
+    # docs are read-only at runtime, and the UI needs it on every page load
+    # to turn a bare "[RET-1]" in an answer into a named rule.
+    POLICY_INDEX = [
+        {"section_id": c.section_id, "title": c.title, "source": c.source}
+        for c in load_chunks()
+    ]
     yield
     # Pools are closed by db.pool's atexit handler; nothing to do here yet.
 
@@ -120,11 +137,19 @@ class ChatRequest(BaseModel):
 
 
 class PendingApproval(BaseModel):
-    """Returned when the graph paused for a human decision."""
+    """Returned when the graph paused for a human decision.
+
+    Everything here comes straight off the parked RefundRequest. The
+    approver is being asked to authorise money leaving the business, so
+    the card they see names WHAT, for WHOM, and WHY - an approval screen
+    that shows only an amount is a rubber stamp with extra steps.
+    """
 
     refund_id: str
     order_id: str
+    customer_id: str
     customer_name: str
+    product_name: str
     amount_usd: str
     reason: str
     prompt: str
@@ -165,6 +190,33 @@ class ApprovalRequest(BaseModel):
 class Message(BaseModel):
     role: str
     text: str
+
+
+class ConversationState(BaseModel):
+    """Where a conversation stands right now, without running anything.
+
+    The UI needs this for two moments POST /chat cannot cover: restoring a
+    page that was reloaded mid-approval, and noticing that someone else
+    has since made the decision. Both are reads of the checkpointer, so
+    neither costs a model call.
+    """
+
+    thread_id: str
+    exists: bool
+    held: bool = Field(
+        description="True while the run is frozen awaiting a human decision."
+    )
+    pending_approval: PendingApproval | None = None
+    customer_id: str | None = None
+    gate_blocked: bool = False
+
+
+class PolicySection(BaseModel):
+    """One citable rule. The UI resolves '[RET-1]' against these."""
+
+    section_id: str
+    title: str
+    source: str
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +283,7 @@ def approve(req: ApprovalRequest) -> ChatResponse:
     state = GRAPH.get_state(config)
     if not state.values:
         raise HTTPException(404, f"No conversation with thread_id {req.thread_id!r}")
-    if not state.tasks or not any(t.interrupts for t in state.tasks):
+    if _pending_for(state) is None:
         raise HTTPException(
             409,
             "This conversation is not waiting for an approval. Nothing to resume.",
@@ -270,6 +322,54 @@ def transcript(thread_id: str) -> list[Message]:
         elif isinstance(m, AIMessage) and not m.tool_calls:
             out.append(Message(role="assistant", text=m.text))
     return out
+
+
+@app.get(
+    "/conversations/{thread_id}/state",
+    response_model=ConversationState,
+    tags=["conversation"],
+)
+def conversation_state(thread_id: str) -> ConversationState:
+    """Is this conversation frozen, and if so, on what?
+
+    WHY THE UI CANNOT LIVE WITHOUT THIS. POST /chat tells you a run froze,
+    but only the caller that froze it, and only once. Two things happen
+    afterwards that no chat response can report:
+
+      * the customer reloads the page - the pending approval is in
+        Postgres, not in their tab, and must be read back
+      * someone else approves it from another device - the customer's page
+        has to find out, and polling a read is how
+
+    Both are reads of the checkpointer, so neither costs a model call.
+    Unknown threads answer exists=false rather than 404: a stale id in a
+    browser is an ordinary Monday, not an error worth a red log line.
+    """
+    state = GRAPH.get_state(trace_config(thread_id))
+    if not state.values:
+        return ConversationState(thread_id=thread_id, exists=False, held=False)
+
+    pending = _pending_for(state)
+    return ConversationState(
+        thread_id=thread_id,
+        exists=True,
+        held=pending is not None,
+        pending_approval=pending,
+        customer_id=state.values.get("customer_id"),
+        gate_blocked=bool(state.values.get("gate_blocked")),
+    )
+
+
+@app.get("/policies", response_model=list[PolicySection], tags=["ops"])
+def policies() -> list[PolicySection]:
+    """Every citable section id, with the rule it names and the file it lives in.
+
+    Answers turn up carrying bare markers like "[RET-1]". On their own
+    those are noise to a customer; resolved against this list they become
+    "Return window (returns.md)" - the rule the answer is standing on,
+    named. Cheap to serve because it is computed once at startup.
+    """
+    return [PolicySection(**p) for p in POLICY_INDEX]
 
 
 @app.post("/conversations/{thread_id}/close", tags=["conversation"])
@@ -312,6 +412,37 @@ def metrics() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _approval_from_payload(payload: dict) -> PendingApproval:
+    """Turn one interrupt() payload into the API's approval card."""
+    r = payload["refund"]
+    return PendingApproval(
+        refund_id=r["refund_id"],
+        order_id=r["order_id"],
+        customer_id=r["customer_id"],
+        customer_name=r["customer_name"],
+        product_name=r["product_name"],
+        # Decimal is not JSON. Serialising it as a string rather than a
+        # float is deliberate: money that has been through a binary float
+        # is money you cannot reconcile.
+        amount_usd=str(r["amount_usd"]),
+        reason=r["reason"],
+        prompt=payload["prompt"],
+    )
+
+
+def _pending_for(state: Any) -> PendingApproval | None:
+    """The approval a SAVED state is frozen on, or None if it is running.
+
+    A checkpointed state records its pause as a task carrying interrupts.
+    Reading it here - rather than in each caller - keeps /approve's 409
+    and the UI's poll agreeing on one definition of "frozen".
+    """
+    for task in state.tasks or ():
+        for itr in task.interrupts or ():
+            return _approval_from_payload(itr.value)
+    return None
+
+
 def _to_response(
     result: dict, thread_id: str, since_usage: int, since_timings: int
 ) -> ChatResponse:
@@ -323,16 +454,7 @@ def _to_response(
         # The run is frozen. There is no answer yet - and saying so with
         # an explicit null is better than inventing a placeholder, because
         # the caller must render an approval UI, not a chat bubble.
-        payload = result["__interrupt__"][0].value
-        r = payload["refund"]
-        pending = PendingApproval(
-            refund_id=r["refund_id"],
-            order_id=r["order_id"],
-            customer_name=r["customer_name"],
-            amount_usd=str(r["amount_usd"]),
-            reason=r["reason"],
-            prompt=payload["prompt"],
-        )
+        pending = _approval_from_payload(result["__interrupt__"][0].value)
     else:
         msg = next(
             (m for m in reversed(result.get("messages", []))
@@ -357,3 +479,21 @@ def _to_response(
         cost_usd=round(usd, 4),
         seconds=round(elapsed_seconds(result), 2),
     )
+
+
+# ---------------------------------------------------------------------------
+# The browser UI - mounted LAST, and that is not a style preference.
+#
+# A mount at "/" matches every path under it. Starlette tries routes in the
+# order they were registered, so every endpoint above still wins; move this
+# line up and it swallows /chat, /health and /docs, and the API answers
+# "404 Not Found" in HTML for the rest of its life.
+#
+# html=True serves index.html for "/" and falls back to it for unknown
+# paths, so a bookmarked deep link still lands on the app.
+#
+# NO CORS MIDDLEWARE, deliberately: the page and the API are the same
+# origin because they are the same process. CORS is the tax you pay for
+# hosting them apart, and we are not.
+# ---------------------------------------------------------------------------
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="ui")

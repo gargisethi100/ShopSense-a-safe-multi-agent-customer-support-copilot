@@ -340,8 +340,9 @@ def chat() -> None:
             # value above coming back OUT of the interrupt() call.
             result = graph.invoke(Command(resume=decision), config)
 
-        # Show the internal steps, then the answer. In the Streamlit UI
-        # (Phase 9) the steps get hidden and only the answer is shown.
+        # Show the internal steps, then the answer. The browser UI hides
+        # the steps and shows only the answer; this CLI is where you
+        # want to see the machinery.
         for m in result["messages"]:
             if isinstance(m, AIMessage) and m.tool_calls:
                 for c in m.tool_calls:
