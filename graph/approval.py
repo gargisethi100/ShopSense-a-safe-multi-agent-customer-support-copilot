@@ -38,7 +38,7 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage
 from langgraph.types import interrupt
 
-from graph.state import ShopSenseState
+from graph.state import INTERNAL, ShopSenseState
 from tools.refund_tool import RefundRequest, execute_refund
 
 
@@ -76,7 +76,13 @@ def refund_approval_node(state: ShopSenseState) -> dict:
                         f"DECLINED by {approver} ({note}). No money has moved. "
                         "Explain this to the customer plainly and offer to "
                         "escalate to human support if they disagree."
-                    )
+                    ),
+                    # MACHINERY, NOT CONVERSATION. This is a note to the
+                    # order agent, which build.py routes it to; the customer
+                    # reads the reply the agent writes from it, not this.
+                    # api/main.py's transcript filters on this name, exactly
+                    # as it already filters out tool calls and tool results.
+                    name=INTERNAL,
                 )
             ],
             "pending_refund": None,
@@ -87,7 +93,7 @@ def refund_approval_node(state: ShopSenseState) -> dict:
     # money - and it cannot be reached without a human's name in hand.
     result = execute_refund(RefundRequest(**pending), approved_by=approver)
     return {
-        "messages": [AIMessage(content=result)],
+        "messages": [AIMessage(content=result, name=INTERNAL)],
         "pending_refund": None,
         "gate_flags": [f"refund {pending['refund_id']} approved by {approver}"],
     }

@@ -201,11 +201,24 @@ def execute_refund(request: RefundRequest, approved_by: str) -> str:
             # with-block exit commits (writer pool is transactional).
     except psycopg.Error:
         return _DB_ERROR
+    # A NOTE TO THE TEAM, NOT A REPLY TO THE CUSTOMER. This becomes an
+    # AIMessage in refund_approval_node, and graph/build.py routes it
+    # straight to the order agent to be turned into something a person
+    # should read - never shown as-is.
+    #
+    # It is still written to survive being read out by accident: the
+    # instruction leads, and the reference id and approver's name come last
+    # with a note not to recite them. Belt and braces, because the earlier
+    # wording DID reach a customer when this hop was the supervisor's
+    # judgement call rather than a fixed edge.
     return (
-        f"REFUND RECORDED: {request.refund_id} - ${request.amount_usd:.2f} for "
-        f"order {request.order_id}, approved by {approved_by}. Tell the "
-        "customer the refund is confirmed and typically lands in 5-10 "
-        "business days."
+        f"Refund APPROVED for order {request.order_id}. A human has now "
+        "decided, so the earlier note saying the request was awaiting "
+        "review is out of date - do not tell the customer it is still "
+        f"pending. Confirm that their ${request.amount_usd:.2f} refund is "
+        "going through, and that the money typically lands 5-10 business "
+        f"days from now. Recorded as {request.refund_id} under "
+        f"{approved_by} - do not read those details out unless asked."
     )
 
 

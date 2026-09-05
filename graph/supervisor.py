@@ -97,6 +97,10 @@ Guidance:
 - Route on what is still MISSING, not on what has already been done. If a \
 specialist has just supplied the missing piece and nothing else is needed, \
 FINISH.
+- If the last assistant message ASKS THE CUSTOMER for something - an email, \
+an order number, a choice between options - choose FINISH. The turn is over \
+until they reply. Routing to a specialist again cannot conjure the answer; \
+it only asks the same question twice.
 - A question can need both specialists in turn: e.g. "can I return the \
 headphones I got last week?" needs the policy rule AND the order's delivery \
 date. Route to one now; you will be asked again after it reports back.

@@ -41,6 +41,21 @@ from langgraph.graph.message import add_messages
 # mysterious dead end.
 Route = Literal["order_agent", "policy_agent", "FINISH"]
 
+# The name stamped on messages that are MACHINERY rather than conversation.
+#
+# Not everything an AIMessage carries is something a customer should read.
+# The refund gate writes notes to the team - "APPROVED, confirm this to the
+# customer", "DECLINED by X, explain this plainly" - and a specialist turns
+# them into a reply. Both live in state["messages"], because the specialist
+# has to see them; only one belongs in front of a person.
+#
+# Tool calls and tool results are already filtered out of the transcript by
+# their TYPE. These are AIMessages, so they need a name to be told apart -
+# and a named constant rather than a bare string, so a typo in the filter
+# is a NameError instead of an internal note quietly reaching a customer.
+# (It did exactly that until this existed.)
+INTERNAL = "internal"
+
 
 class UsageRecord(TypedDict):
     """One LLM call's cost, recorded as it happens.

@@ -57,7 +57,7 @@ from pydantic import BaseModel, Field
 
 from graph.build import build_graph, get_checkpointer
 from graph.memory import save_profile
-from graph.state import elapsed_seconds, usage_totals
+from graph.state import INTERNAL, elapsed_seconds, usage_totals
 from obs.costlog import load_runs, record_run, trace_config, tracing_status
 from rag.retriever import load_chunks
 
@@ -307,9 +307,14 @@ def approve(req: ApprovalRequest) -> ChatResponse:
 def transcript(thread_id: str) -> list[Message]:
     """The conversation so far, straight from the checkpointer.
 
-    Tool calls and tool results are filtered out: they are machinery, not
-    conversation, and belong in the trace rather than in front of a
-    customer.
+    Tool calls, tool results, and the refund gate's internal notes are all
+    filtered out: they are machinery, not conversation, and belong in the
+    trace rather than in front of a customer.
+
+    The notes are the subtle one. "APPROVED, confirm this to the customer"
+    is an AIMessage like any other, so nothing about its TYPE says to hide
+    it - and for a while the customer read it, reference id and all, sitting
+    just above the reply written from it. Hence the name stamped on it.
     """
     values = GRAPH.get_state(trace_config(thread_id)).values
     if not values:
@@ -319,7 +324,7 @@ def transcript(thread_id: str) -> list[Message]:
     for m in values.get("messages", []):
         if isinstance(m, HumanMessage):
             out.append(Message(role="customer", text=m.text))
-        elif isinstance(m, AIMessage) and not m.tool_calls:
+        elif isinstance(m, AIMessage) and not m.tool_calls and m.name != INTERNAL:
             out.append(Message(role="assistant", text=m.text))
     return out
 
@@ -458,7 +463,8 @@ def _to_response(
     else:
         msg = next(
             (m for m in reversed(result.get("messages", []))
-             if isinstance(m, AIMessage) and not m.tool_calls),
+             if isinstance(m, AIMessage) and not m.tool_calls
+             and m.name != INTERNAL),
             None,
         )
         answer = msg.text if msg else None

@@ -57,6 +57,19 @@ ROUTING_CASES = [
     ),
 ]
 
+# The clarifying question, which has no customer message of its own: the
+# agent has just asked for an email and the turn should END until they
+# answer. Routing to a specialist here used to send Bedrock a conversation
+# ending in an assistant turn, which it refuses - a 500 in the customer's
+# face on a path the system is DESIGNED to take (see
+# test_tool_selection.py's "no tool call without an identifier").
+# agents/common.py makes that unable to crash; this keeps it from
+# happening at all.
+CLARIFYING_QUESTION = [
+    HumanMessage(content="Where is my order?"),
+    AIMessage(content="What's the email address on the order?"),
+]
+
 # Allow one miss out of eleven. Routing is a judgement call at the edges
 # ("my headphones arrived cracked" is arguably both), and a suite that
 # demands perfection from a probabilistic system gets disabled the first
@@ -93,6 +106,20 @@ def test_refund_request_reaches_the_order_agent():
         "messages": [HumanMessage(content="Please refund order ord_1003, it broke.")]
     }
     assert supervisor_node(state)["route"] == "order_agent"
+
+
+@pytest.mark.live
+def test_a_question_to_the_customer_ends_the_turn():
+    """Regression: asking for an email then routing again produced a 500.
+
+    This case cannot go in ROUTING_CASES because it has no new customer
+    message - the whole point is that the last word is the AGENT'S. The
+    right answer is FINISH: nobody can make progress until the customer
+    replies, and routing to the order agent only asks the same question a
+    second time (which is exactly what the live transcript showed).
+    """
+    state: ShopSenseState = {"messages": list(CLARIFYING_QUESTION)}
+    assert supervisor_node(state)["route"] == "FINISH"
 
 
 @pytest.mark.live
@@ -160,6 +187,31 @@ def test_hop_cap_forces_finish_without_calling_the_model():
     out = supervisor_node(state)
     assert out["route"] == "FINISH"
     assert "usage" not in out, "the guard must fire before any model call"
+
+
+def test_a_decided_refund_is_always_relayed_by_an_agent():
+    """Regression: the approval note was shown to the customer verbatim.
+
+    refund_approval writes a note to the TEAM ("APPROVED, confirm this to
+    the customer"). That edge used to go to the supervisor, which was free
+    to answer FINISH - and did, because the note names an amount and an
+    order and reads like a finished reply. The customer got the internal
+    text, reference id and all. Rewording the note did not fix it; the
+    router made the same call. Only a fixed edge did.
+
+    Asserted on the compiled graph, so it needs no model and no database -
+    build_graph(checkpointer=None) is a complete, if forgetful, system.
+    """
+    from graph.build import build_graph
+
+    edges = {
+        (e.source, e.target) for e in build_graph(checkpointer=None).get_graph().edges
+    }
+    assert ("refund_approval", "order_agent") in edges, (
+        "a human's decision about money must be explained by an agent, "
+        "not left to the supervisor's discretion"
+    )
+    assert ("refund_approval", "supervisor") not in edges
 
 
 def test_routing_schema_rejects_invented_routes():

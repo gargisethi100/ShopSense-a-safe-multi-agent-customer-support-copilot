@@ -183,7 +183,25 @@ def build_graph(checkpointer=None):
         route_after_order_agent,
         {"refund_approval": "refund_approval", "supervisor": "supervisor"},
     )
-    builder.add_edge("refund_approval", "supervisor")
+    # A DECIDED REFUND ALWAYS GETS RELAYED BY A SPECIALIST, never by luck.
+    #
+    # refund_approval does not write customer-facing prose - it writes a note
+    # to the team ("APPROVED by X, confirm this to the customer"). Something
+    # has to turn that into words a person should read.
+    #
+    # This edge used to go to the supervisor, which was free to answer
+    # FINISH - and it did, because a refund note mentions an amount and an
+    # order and reads a lot like a finished reply. The turn then ended with
+    # the internal note itself shown to the customer, reference id and all.
+    # Rewording the note did not help: the router made the same call.
+    #
+    # So the edge is now data-driven, exactly like the one INTO the gate
+    # above. A human's decision about money is always explained by an agent
+    # holding the customer's context, and no prompt gets a vote. The order
+    # agent's own routing then continues as normal - pending_refund has been
+    # cleared by this point, so it reports to the supervisor and cannot loop
+    # back into the gate.
+    builder.add_edge("refund_approval", "order_agent")
     builder.add_edge("policy_agent", "supervisor")
 
     return builder.compile(checkpointer=checkpointer)

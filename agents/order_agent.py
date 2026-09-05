@@ -38,15 +38,10 @@ from __future__ import annotations
 
 import re
 
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-)
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from agents.common import specialist_convo
 from config import get_settings
-from graph.memory import summary_preamble
 from graph.state import ShopSenseState
 from llm import get_llm, usage_from
 from tools.order_tools import ORDER_TOOLS
@@ -81,8 +76,13 @@ restating their question back to them.
 customer actually wants.
 - If a tool reports something is not found or not allowed, say so plainly and \
 give the customer the next step it suggests. Never invent a workaround.
-- Refunds are not final until a human approves them. Say the request is \
-submitted for approval; never tell a customer their money is on the way.
+- Refunds are not final until a human approves them. While a request is still \
+waiting on that decision, say it has been submitted for approval and never \
+tell the customer their money is on the way.
+- Once a human HAS decided, relay their decision accurately. An approved \
+refund is confirmed, not pending - telling a customer it is still awaiting \
+review after it has been approved and paid is wrong, and so is repeating an \
+earlier note that said so.
 - You handle orders only. If the question is about POLICY (what the rules \
 are - return windows, warranty coverage, shipping costs), say you'll hand it \
 to the policy specialist rather than answering from memory."""
@@ -93,18 +93,12 @@ def order_agent_node(state: ShopSenseState) -> dict:
     settings = get_settings()
     llm = get_llm("agent").bind_tools(TOOLS)
 
-    # The conversation as the model sees it: our instructions + the real
-    # transcript. `state["messages"]` is never mutated - we build a local
-    # working list and return only what's new.
-    # summary_preamble injects the rolling summary and the customer's
-    # profile as context. It is spliced in HERE rather than stored in
-    # state["messages"], so it never becomes part of the transcript it
-    # describes (and never gets summarised into itself).
-    convo = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        *summary_preamble(state),
-        *(state.get("messages") or []),
-    ]
+    # The conversation as the model sees it: our instructions + the memory
+    # context + the real transcript. `state["messages"]` is never mutated -
+    # this is a local working list, and we return only what's new.
+    # See agents/common.py for why the construction is shared, and for the
+    # Bedrock message-ordering rule it guarantees.
+    convo = specialist_convo(state, SYSTEM_PROMPT)
     new_messages: list = []
     usage_records: list[dict] = []
     flags: list[str] = []

@@ -32,15 +32,10 @@ Run directly (needs Bedrock; no database):
 
 from __future__ import annotations
 
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-)
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from agents.common import specialist_convo
 from config import get_settings
-from graph.memory import summary_preamble
 from graph.state import ShopSenseState
 from llm import get_llm, usage_from
 from tools.policy_tools import POLICY_TOOLS
@@ -86,11 +81,9 @@ def policy_agent_node(state: ShopSenseState) -> dict:
     settings = get_settings()
     llm = get_llm("agent").bind_tools(TOOLS)
 
-    convo = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        *summary_preamble(state),
-        *(state.get("messages") or []),
-    ]
+    # Shared with the order agent - see agents/common.py for why, and for
+    # the Bedrock message-ordering rule it guarantees.
+    convo = specialist_convo(state, SYSTEM_PROMPT)
     new_messages: list = []
     usage_records: list[dict] = []
     flags: list[str] = []
